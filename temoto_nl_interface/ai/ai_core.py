@@ -4,17 +4,13 @@ from openai import OpenAI
 import os
 import json
 
-####################################### Update filepath for api key ######
-
-file_path = '~/CHATGPT_KEY'
-
 ##########################################################################
 
-# Function to retrieve API key
 def get_api_key():
-    expanded_file_path = os.path.expanduser(file_path)
-    with open(expanded_file_path, 'r') as file:
-        return file.read().strip()
+    api_key = os.environ.get('OPENAI_API_KEY')
+    if not api_key:
+        raise ValueError("OPENAI_API_KEY environment variable not set")
+    return api_key
 
     # TEMPERATURE       - Controls response creativity
     # MAX_TOKENS        - Maximum tokens in response

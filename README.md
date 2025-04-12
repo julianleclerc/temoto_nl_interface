@@ -13,6 +13,10 @@ git clone ...
 cd <PATH-TO-YOUR-ROS2-WS>
 source /opt/ros/<YOUR-ROS2-DISTRO>/setup.bash
 colcon build
+
+# Set OpenAI key as environment variable:
+SET OPENAI_API_KEY=your_api_key_here
+
 ```
 
 # Run the launch file

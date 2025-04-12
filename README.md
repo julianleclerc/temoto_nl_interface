@@ -1,5 +1,5 @@
 # temoto_nl_interface
-ROS2 Natural Language Interface for TeMoto Action Engine
+ROS2 Natural Language Interface for TeMoto
 
 ## Installation Instructions
 ```bash

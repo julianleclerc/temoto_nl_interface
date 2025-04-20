@@ -86,7 +86,7 @@ class TargetManager:
     """Class for managing multiple TargetUMRF instances."""
     
     def __init__(self):
-        self.targets = {} 
+        self.targets = {}  # Dictionary mapping target names to TargetUMRF objects
         
     def get_target(self, target_name):
         """Get a target by name, returning None if it doesn't exist."""
@@ -115,7 +115,7 @@ class TargetManager:
 class UMRF_PLANNER(Node):
     
     def __init__(self):
-        super().__init__('umrf_planner_node')
+        super().__init__('planner_node')
         
         self.target_manager = TargetManager()
 
@@ -231,14 +231,14 @@ class UMRF_PLANNER(Node):
                 if target_umrf.stop_status:
                     # If target is stopped delete the noncompleted queue
                     target_umrf.clear_queue()
-                    #target_umrf.add_to_queue(queue_input_json["queue"])
+                    target_umrf.add_to_queue(queue_input_json["queue"])
                     self.get_logger().info(f'Added {len(queue_input_json["queue"])} items to queue for target: {target}')
-                    #self.update_json_queue(target)
+                    self.update_json_queue(target)
                 else:
                     # Add new actions to the target's queue
                     target_umrf.add_to_queue(queue_input_json["queue"])
                     self.get_logger().info(f'Added {len(queue_input_json["queue"])} items to queue for target: {target}')
-                    #self.update_json_queue(target)
+                    self.update_json_queue(target)
             else:
                 self.get_logger().error(f'Target "{target}" not found in target manager.')
         else:
@@ -311,7 +311,7 @@ class UMRF_PLANNER(Node):
         try:
             # Pop the element at the given index from the target's queue
             popped_action = target_umrf.pop_from_queue(index)
-            #self.update_json_queue(target)
+            self.update_json_queue(target)
             self.get_logger().info(f"Popped action at index {index} for target '{target}': {popped_action}")
             return popped_action
         except IndexError:
@@ -352,24 +352,20 @@ class UMRF_PLANNER(Node):
         if target_umrf is None:
             self.get_logger().error(f'Target "{target}" not found in target manager.')
             return
-        
-        is_on_hold = target_umrf.is_on_hold()
-        if is_on_hold == False:
-            # Update the statuses for this target
-            target_umrf.set_stop(False)
 
-            # Update overall status and publish stop signal
-            #msg = UmrfGraphResume()
-            #msg.umrf_graph_name = target_umrf.graph_name
-            #msg.targets = [target]
-            #self.umrf_resume_pub.publish(msg)
+        # Update the statuses for this target
+        target_umrf.set_stop(False)
+        target_umrf.set_hold(False)
 
-            # Reflect the changes in the JSON queue
-            self.update_json_queue(target)
-            self.get_logger().info(f"Actions restarted for target: {target}")
-        else:
-            self.get_logger().warn(f"Tried to start action for target {target} while on hold...")
+        # Update overall status and publish stop signal
+        msg = UmrfGraphResume()
+        msg.umrf_graph_name = target_umrf.graph_name
+        msg.targets = [target]
+        self.umrf_resume_pub.publish(msg)
 
+        # Reflect the changes in the JSON queue
+        self.update_json_queue(target)
+        self.get_logger().info(f"Actions restarted for target: {target}")
 
     def stop(self, value, target):
         '''
@@ -418,6 +414,9 @@ class UMRF_PLANNER(Node):
         for i, element in enumerate(queue_input_json["queue"]):
             target_umrf.queue_json.insert(index + i, element)
             
+        # Update the JSON queue
+        self.update_json_queue(target)
+
     def _call_action(self, action_name, action_value, target):
         """
         Dynamically calls a method based on the action_name.
@@ -458,11 +457,11 @@ class UMRF_PLANNER(Node):
     #################################
 
     def is_empty(self, value):
-        if value is None:
+        if value is None:  # Check for null
             return True
         if isinstance(value, str) and value.strip() == "":
             return True
-        if isinstance(value, (list, dict)) and len(value) == 0:
+        if isinstance(value, (list, dict)) and len(value) == 0:  # Empty list or dictionary
             return True
         return False
 
@@ -630,7 +629,10 @@ class UMRF_PLANNER(Node):
             system_input_json = {"system_cmd": json_response["system_cmd"]}
             self.system_commands(system_input_json, target)
         else:
-            self.get_logger().warning('No "system_cmd" key found or "system_cmd" is empty in the received JSON.')
+            self.get_logger().warning('No "system_cmd" key found or "system_cmd" is empty in the received JSON, resuming process.')
+            # Resume the process
+            self.start(0, target)
+
 
 
     #### UMRF FEEDBACK callback ##############
@@ -672,7 +674,7 @@ class UMRF_PLANNER(Node):
                 self.stop(0, target)
                 return
 
-        #self.get_logger().info(f"Most recent json: {most_recent_json}")
+        self.get_logger().info(f"Most recent json: {most_recent_json}")
 
         # Reset Target upon completion or stopped
         try:
@@ -705,87 +707,94 @@ class UMRF_PLANNER(Node):
                 self.stop(0, target)
                 return
 
-        ### MOVING COMPLETED ACTIONS FROM UMRF QUEUE TO COMPLETED QUEUE
+        ### REBUILD COMPLETED AND QUEUE ACTIONS BASED ON FEEDBACK
         try:            
-            self.get_logger().debug("Starting to process completed actions")    
-            # Assuming the message contains an 'actions' key with process details
-            completed_ids = []
-
-            if 'actions' in umrf_history:
-                self.get_logger().debug(f"Processing {len(umrf_history.get('actions', []))} actions")
-                for i, action in enumerate(umrf_history.get('actions', [])):
-                    self.get_logger().debug(f"Action {i}: ID={action.get('instance_id')}, State={action.get('state')}, Name={action.get('name')}")
-                    # Check for completed states
-                    if action.get('state') in ['FINISHED']:
-                        completed_ids.append(action.get('instance_id'))
+            self.get_logger().debug("Starting to process completed and queued actions")    
             
-            self.get_logger().debug(f"Found {len(completed_ids)} completed actions: {completed_ids}")
-            
-            if completed_ids:
-                # Last completed id
-                last_completed_id = completed_ids[-1]
-                self.get_logger().info(f"Last completed action ID: {last_completed_id}")
-                
-                # Get the target from the manager
-                target_umrf = self.target_manager.get_target(target)
-                        
-                if target_umrf is None:
-                    self.get_logger().info(f"No target found for: {target}")
-                    self.get_logger().debug(f"Available targets in manager: {[t.target for t in self.target_manager.get_all_targets()]}")
-                    return
-                
-                # Define an inline function to get action ID
-                def get_action_id(action):
-                    self.get_logger().debug(f"Extracting ID from action: {list(action.keys()) if isinstance(action, dict) else 'non-dict type'}")
-                    # Extract instance_id or create a unique identifier from the action
-                    for action_name, action_data in action.items():
-                        if isinstance(action_data, dict) and "instance_id" in action_data:
-                            self.get_logger().debug(f"Found instance_id: {action_data['instance_id']}")
-                            return action_data["instance_id"]
-                    # If we can't find an instance_id, use position in the list
-                    self.get_logger().debug("Could not find instance_id in action")
-                    return None
-                
-                # Move actions until the last completed ID
-                actions_to_move = []
-                remaining_actions = []
-                
-                found_last_completed = False
-                queue_json = target_umrf.queue_json
-                self.get_logger().debug(f"Processing {len(queue_json)} actions in queue")
-                
-                for i, action in enumerate(queue_json):
-                    # Extract the instance_id from the action or use index as fallback
-                    action_id = get_action_id(action) or i
-                    self.get_logger().debug(f"Action {i}: ID={action_id}, Found last completed={found_last_completed}")
+            # Get the target from the manager
+            target_umrf = self.target_manager.get_target(target)
                     
-                    if found_last_completed:
-                        remaining_actions.append(action)
-                    else:
-                        actions_to_move.append(action)
-                        if action_id == last_completed_id:
-                            self.get_logger().debug(f"Found last completed action at index {i}")
-                            found_last_completed = True
+            if target_umrf is None:
+                self.get_logger().info(f"No target found for: {target}")
+                return
+            
+            # Store the original actions before processing
+            original_completed = target_umrf.completed_json.copy()
+            original_queue = target_umrf.queue_json.copy()
+            original_total_actions = len(original_completed) + len(original_queue)
+            
+            self.get_logger().debug(f"Original state - completed: {len(original_completed)}, queue: {len(original_queue)}")
+            
+            # Create a map of action states from the feedback
+            action_states = {}
+            
+            if 'actions' in umrf_history:
+                sorted_actions = sorted(umrf_history.get('actions', []), key=lambda x: x.get('instance_id', float('inf')))
                 
-                # Update the queues
-                self.get_logger().debug(f"Before update: completed={len(target_umrf.completed_json)}, queue={len(target_umrf.queue_json)}")
-                target_umrf.completed_json.extend(actions_to_move)
-                target_umrf.queue_json = remaining_actions
-                self.get_logger().debug(f"After update: completed={len(target_umrf.completed_json)}, queue={len(target_umrf.queue_json)}")
+                for action in sorted_actions:
+                    action_name = action.get('name')
+                    instance_id = action.get('instance_id')
+                    state = action.get('state')
+                    
+                    action_states[instance_id] = {
+                        'name': action_name,
+                        'state': state
+                    }
+                    
+                    self.get_logger().debug(f"Action {action_name}_{instance_id}: State={state}")
+            
+            # Find the dividing line between completed and non-completed actions
+            last_completed_id = -1
+            for instance_id in sorted(action_states.keys()):
+                if action_states[instance_id]['state'] == 'FINISHED':
+                    last_completed_id = max(last_completed_id, instance_id)
+            
+            # Now rebuild the queues based on the last completed ID
+            new_completed_json = []
+            new_queue_json = []
+            
+            # Process each action from the original lists
+            original_actions = original_completed + original_queue
+            
+            if last_completed_id >= 0:
+                # Move completed actions
+                for i in range(last_completed_id + 1):
+                    if i < len(original_actions):
+                        new_completed_json.append(original_actions[i])
                 
-                self.get_logger().info(f"Moved {len(actions_to_move)} actions to completed queue for target: {target}")
+                # Move remaining actions to queue
+                for i in range(last_completed_id + 1, len(original_actions)):
+                    if i < len(original_actions):
+                        new_queue_json.append(original_actions[i])
             else:
-                last_completed_id = -1
-                self.get_logger().debug("No completed actions found, setting last_completed_id to -1")
+                # No completed actions, everything stays in queue
+                new_completed_json = []
+                new_queue_json = original_actions
+            
+            # Update the target's queues
+            target_umrf.completed_json = new_completed_json
+            target_umrf.queue_json = new_queue_json
+            
+            # Verify we haven't lost any actions
+            final_total_actions = len(target_umrf.completed_json) + len(target_umrf.queue_json)
+            
+            if final_total_actions != original_total_actions:
+                self.get_logger().error(f"Action count mismatch! Original: {original_total_actions}, Current: {final_total_actions}")
+                # Restore original state if we lost actions
+                target_umrf.completed_json = original_completed
+                target_umrf.queue_json = original_queue
+                self.get_logger().error(f"Restored original queue state to prevent action loss")
+            else:
+                self.get_logger().info(f"Rebuilt queues - completed: {len(target_umrf.completed_json)}, queue: {len(target_umrf.queue_json)} for target: {target}")
         
         except Exception as e: 
-            self.get_logger().error(f"Error transfering completed actions in umrf_feedback: {str(e)}")
+            self.get_logger().error(f"Error processing actions in umrf_feedback: {str(e)}")
             self.get_logger().error(f"Exception type: {type(e).__name__}")
             self.get_logger().error(f"Traceback: {traceback.format_exc()}")
             if 'target' in locals():
-                self.get_logger().info(f"Stopping processing for target: {target} due to error")
                 self.stop(0, target)
 
+        return
         ### ERROR HANDLING
         self.get_logger().info(f"Starting error handling process")
         try:
@@ -806,16 +815,7 @@ class UMRF_PLANNER(Node):
                     if current_state == "ERROR":
                         error_state = True
                         self.get_logger().info(f"Error detected in action: ID={current_id}, Name={action.get('name')}")
-                        target_umrf = self.target_manager.get_target(target)
                         
-                        if target_umrf is None:
-                            self.get_logger().error(f"No target found for: {target}")
-                            return
-                        
-                        if target_umrf.is_on_hold():
-                            self.get_logger().info(f"Target {target} is already on hold, skipping error handling")
-                            return
-
                         # Extract error information from runtime messages
                         if 'runtime' in action and 'messages' in action['runtime']:
                             messages = action['runtime']['messages']
@@ -908,12 +908,12 @@ class UMRF_PLANNER(Node):
             
             self.get_logger().info("------- UMRF FEEDBACK END -------")
 
-
     #### BUILD UMRF ##############
     # 
     # Builds the UMRF Graph in order to publish to the temoto action engine
     #
     #################################
+
     def _build_umrf_graph(self, target_umrf):
         """
         Build and return the UMRF graph, resume action, and resume ID for the given target.
@@ -926,7 +926,7 @@ class UMRF_PLANNER(Node):
             tuple: (umrf_graph, resume_action, resume_id) where:
                 - umrf_graph is the constructed UMRF graph
                 - resume_action is the name of the first action in current_queue
-                - resume_id is the instance ID of the first action in current_queue within the combined graph
+                - resume_id is the instance ID of the first action in current_queue
         """    
         if target_umrf is None:
             self.get_logger().error('Target UMRF is None.')
@@ -940,20 +940,22 @@ class UMRF_PLANNER(Node):
         current_queue = target_umrf.queue_json
         completed_queue = target_umrf.completed_json
         
-        # Track the resume action (first action of current queue) and its ID in the combined graph
+        self.get_logger().debug(f'Building graph: completed={len(completed_queue)}, queue={len(current_queue)}')
+        
+        # Track the resume action and its ID
         resume_action = None
-        resume_id = len(completed_queue)
+        resume_id = None
         
         # If both queues are empty, return empty graph
         if not current_queue and not completed_queue:
             self.get_logger().warning('Both current and completed queues are empty.')
             return {"graph_name": graph_name, "graph_description": graph_description, "actions": []}, None, 0
         
-        # Create a linear flow of actions for the combined queue
+        # Create a linear flow of actions
         actions = []
         instance_id = 0
         
-        # Process completed queue first (in order from oldest to newest)
+        # Process completed queue first
         for step_idx, step in enumerate(completed_queue):
             for action_name, action_data in step.items():
                 # Create the action entry
@@ -963,27 +965,14 @@ class UMRF_PLANNER(Node):
                     "type": "sync"
                 }
                 
-                # Handle different JSON formats for parameters
+                # Handle parameters
                 if isinstance(action_data, dict):
                     if "input_parameters" in action_data:
                         action_info["input_parameters"] = action_data["input_parameters"]
                     
                     if "output_parameters" in action_data:
                         action_info["output_parameters"] = action_data["output_parameters"]
-                    
-                    # Handle case where input_parameters are directly embedded
-                    elif any(key not in ["input_parameters", "output_parameters"] for key in action_data.keys()):
-                        # Convert old format to new format
-                        input_params = {}
-                        for key, value in action_data.items():
-                            if key not in ["input_parameters", "output_parameters", "input_parameters"]:
-                                input_params[key] = {
-                                    "pvf_type": "string",
-                                    "pvf_value": str(value)
-                                }
-                        if input_params:
-                            action_info["input_parameters"] = input_params
-
+                
                 # Add parent/child relationships for linear flow
                 if instance_id > 0:
                     action_info.setdefault('parents', [])
@@ -992,8 +981,8 @@ class UMRF_PLANNER(Node):
                         "instance_id": instance_id - 1,
                         "required": True,
                         "conditions": [
-                            "on_true -> run",
-                            "on_false -> run",
+                            "on_true -> ignore",
+                            "on_false -> ignore",
                             "on_stopped -> ignore",
                             "on_error -> ignore"
                         ]
@@ -1009,16 +998,9 @@ class UMRF_PLANNER(Node):
                 actions.append(action_info)
                 instance_id += 1
         
-        # Now process current queue and mark the first action for resuming
-        is_first_current = True
+        # Now process current queue
         for step_idx, step in enumerate(current_queue):
             for action_name, action_data in step.items():
-                # Set the resume_action for the first action in the current queue
-                if is_first_current:
-                    resume_action = action_name
-                    resume_id = instance_id
-                    is_first_current = False
-                
                 # Create the action entry
                 action_info = {
                     "name": action_name,
@@ -1026,25 +1008,18 @@ class UMRF_PLANNER(Node):
                     "type": "sync"
                 }
                 
-                # Handle different JSON formats for parameters
+                # If this is the first action in the current queue, set it as the resume point
+                if resume_action is None:
+                    resume_action = action_name
+                    resume_id = instance_id
+                
+                # Handle parameters
                 if isinstance(action_data, dict):
                     if "input_parameters" in action_data:
-                        action_info["input_parameters"] = action_data["input_parameters"]                    
+                        action_info["input_parameters"] = action_data["input_parameters"]
+                    
                     if "output_parameters" in action_data:
                         action_info["output_parameters"] = action_data["output_parameters"]
-                    
-                    # Handle case where input_parameters are directly embedded
-                    elif any(key not in ["input_parameters", "output_parameters"] for key in action_data.keys()):
-                        # Convert old format to new format
-                        input_params = {}
-                        for key, value in action_data.items():
-                            if key not in ["input_parameters", "output_parameters", "input_parameters"]:
-                                input_params[key] = {
-                                    "pvf_type": "string",
-                                    "pvf_value": str(value)
-                                }
-                        if input_params:
-                            action_info["input_parameters"] = input_params
                 
                 # Add parent/child relationships for linear flow
                 if instance_id > 0:
@@ -1054,8 +1029,8 @@ class UMRF_PLANNER(Node):
                         "instance_id": instance_id - 1,
                         "required": True,
                         "conditions": [
-                            "on_true -> run",
-                            "on_false -> run",
+                            "on_true -> ignore",
+                            "on_false -> ignore",
                             "on_stopped -> ignore",
                             "on_error -> ignore"
                         ]
@@ -1071,26 +1046,46 @@ class UMRF_PLANNER(Node):
                 actions.append(action_info)
                 instance_id += 1
         
-        # Handle edge case: if only completed queue has actions
-        if not current_queue and completed_queue:
-            resume_action = actions[-1]["name"]
-            resume_id = actions[-1]["instance_id"]
+        # Handle edge case: if no resume point was set but we have actions
+        if resume_action is None:
+            if current_queue:
+                # Find the first action from current_queue in the actions list
+                # This should be at index len(completed_queue)
+                if len(actions) > len(completed_queue):
+                    resume_action = actions[len(completed_queue)]["name"]
+                    resume_id = actions[len(completed_queue)]["instance_id"]
+                else:
+                    # Fall back to the first action
+                    resume_action = actions[0]["name"]
+                    resume_id = 0
+            elif actions:
+                # All actions are completed, use the last action
+                resume_action = actions[-1]["name"]
+                resume_id = actions[-1]["instance_id"]
+            else:
+                # No actions at all
+                self.get_logger().error('No actions available in the graph')
+                return None, None, None
         
         # Set the entry and exit points of the graph
-        graph_entry = [{"name": actions[0]["name"], "instance_id": 0}]
+        graph_entry = []
+        graph_exit = []
         
-        # Add conditions to graph_exit
-        graph_exit = [
-            {
-                "name": actions[-1]["name"],
-                "instance_id": len(actions) - 1,
-                "conditions": [
-                    "on_true -> ignore",
-                    "on_false -> ignore",
-                    "on_error -> ignore"
-                ]
-            }
-        ]
+        if actions:
+            graph_entry = [{"name": actions[0]["name"], "instance_id": 0}]
+            
+            # Add conditions to graph_exit
+            graph_exit = [
+                {
+                    "name": actions[-1]["name"],
+                    "instance_id": len(actions) - 1,
+                    "conditions": [
+                        "on_true -> ignore",
+                        "on_false -> ignore",
+                        "on_error -> ignore"
+                    ]
+                }
+            ]
         
         umrf_graph = {
             "graph_name": graph_name,
@@ -1099,6 +1094,19 @@ class UMRF_PLANNER(Node):
             "graph_exit": graph_exit,
             "actions": actions
         }
+        
+        self.get_logger().debug(f"Built UMRF graph with {len(actions)} actions, resume_action={resume_action}, resume_id={resume_id}")
+        
+        # Additional debug logging for troubleshooting
+        if resume_action and resume_id is not None:
+            action_found = False
+            for action in actions:
+                if action["name"] == resume_action and action["instance_id"] == resume_id:
+                    action_found = True
+                    break
+            
+            if not action_found:
+                self.get_logger().error(f"Resume action {resume_action}_{resume_id} not found in graph")
         
         return umrf_graph, resume_action, resume_id
 

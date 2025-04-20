@@ -231,14 +231,14 @@ class UMRF_PLANNER(Node):
                 if target_umrf.stop_status:
                     # If target is stopped delete the noncompleted queue
                     target_umrf.clear_queue()
-                    target_umrf.add_to_queue(queue_input_json["queue"])
+                    #target_umrf.add_to_queue(queue_input_json["queue"])
                     self.get_logger().info(f'Added {len(queue_input_json["queue"])} items to queue for target: {target}')
-                    self.update_json_queue(target)
+                    #self.update_json_queue(target)
                 else:
                     # Add new actions to the target's queue
                     target_umrf.add_to_queue(queue_input_json["queue"])
                     self.get_logger().info(f'Added {len(queue_input_json["queue"])} items to queue for target: {target}')
-                    self.update_json_queue(target)
+                    #self.update_json_queue(target)
             else:
                 self.get_logger().error(f'Target "{target}" not found in target manager.')
         else:
@@ -311,7 +311,7 @@ class UMRF_PLANNER(Node):
         try:
             # Pop the element at the given index from the target's queue
             popped_action = target_umrf.pop_from_queue(index)
-            self.update_json_queue(target)
+            #self.update_json_queue(target)
             self.get_logger().info(f"Popped action at index {index} for target '{target}': {popped_action}")
             return popped_action
         except IndexError:
@@ -352,20 +352,24 @@ class UMRF_PLANNER(Node):
         if target_umrf is None:
             self.get_logger().error(f'Target "{target}" not found in target manager.')
             return
+        
+        is_on_hold = target_umrf.is_on_hold()
+        if is_on_hold == False:
+            # Update the statuses for this target
+            target_umrf.set_stop(False)
 
-        # Update the statuses for this target
-        target_umrf.set_stop(False)
-        target_umrf.set_hold(False)
+            # Update overall status and publish stop signal
+            #msg = UmrfGraphResume()
+            #msg.umrf_graph_name = target_umrf.graph_name
+            #msg.targets = [target]
+            #self.umrf_resume_pub.publish(msg)
 
-        # Update overall status and publish stop signal
-        msg = UmrfGraphResume()
-        msg.umrf_graph_name = target_umrf.graph_name
-        msg.targets = [target]
-        self.umrf_resume_pub.publish(msg)
+            # Reflect the changes in the JSON queue
+            self.update_json_queue(target)
+            self.get_logger().info(f"Actions restarted for target: {target}")
+        else:
+            self.get_logger().warn(f"Tried to start action for target {target} while on hold...")
 
-        # Reflect the changes in the JSON queue
-        self.update_json_queue(target)
-        self.get_logger().info(f"Actions restarted for target: {target}")
 
     def stop(self, value, target):
         '''
@@ -414,9 +418,6 @@ class UMRF_PLANNER(Node):
         for i, element in enumerate(queue_input_json["queue"]):
             target_umrf.queue_json.insert(index + i, element)
             
-        # Update the JSON queue
-        self.update_json_queue(target)
-
     def _call_action(self, action_name, action_value, target):
         """
         Dynamically calls a method based on the action_name.
@@ -629,10 +630,7 @@ class UMRF_PLANNER(Node):
             system_input_json = {"system_cmd": json_response["system_cmd"]}
             self.system_commands(system_input_json, target)
         else:
-            self.get_logger().warning('No "system_cmd" key found or "system_cmd" is empty in the received JSON, resuming process.')
-            # Resume the process
-            self.start(0, target)
-
+            self.get_logger().warning('No "system_cmd" key found or "system_cmd" is empty in the received JSON.')
 
 
     #### UMRF FEEDBACK callback ##############
@@ -674,7 +672,7 @@ class UMRF_PLANNER(Node):
                 self.stop(0, target)
                 return
 
-        self.get_logger().info(f"Most recent json: {most_recent_json}")
+        #self.get_logger().info(f"Most recent json: {most_recent_json}")
 
         # Reset Target upon completion or stopped
         try:
@@ -808,7 +806,16 @@ class UMRF_PLANNER(Node):
                     if current_state == "ERROR":
                         error_state = True
                         self.get_logger().info(f"Error detected in action: ID={current_id}, Name={action.get('name')}")
+                        target_umrf = self.target_manager.get_target(target)
                         
+                        if target_umrf is None:
+                            self.get_logger().error(f"No target found for: {target}")
+                            return
+                        
+                        if target_umrf.is_on_hold():
+                            self.get_logger().info(f"Target {target} is already on hold, skipping error handling")
+                            return
+
                         # Extract error information from runtime messages
                         if 'runtime' in action and 'messages' in action['runtime']:
                             messages = action['runtime']['messages']

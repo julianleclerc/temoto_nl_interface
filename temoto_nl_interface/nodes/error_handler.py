@@ -284,11 +284,11 @@ class ErrorHandler(Node):
             auto_temperature = data.get("auto_temperature", 0.3)
             auto_max_tokens = data.get("auto_max_tokens", 2000)
             auto_frequency_penalty = data.get("auto_frequency_penalty", 0.0)
-            auto_presence_penalty = data.get("auto_presence_penalty", 0.3)
+            auto_presence_penalty = data.get("auto_presence_penalty", 0.0)
             user_temperature = data.get("user_temperature", 0.3)
             user_max_tokens = data.get("user_max_tokens", 2000)
             user_frequency_penalty = data.get("user_frequency_penalty", 0.0)
-            user_presence_penalty = data.get("user_presence_penalty", 0.3)
+            user_presence_penalty = data.get("user_presence_penalty", 0.0)
 
             # Create target error state
             target_state = TargetErrorState(

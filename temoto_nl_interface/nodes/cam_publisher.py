@@ -1,25 +1,24 @@
 #!/usr/bin/env python3
 import rclpy
 from rclpy.node import Node
-from std_msgs.msg import String
+from sensor_msgs.msg import Image
+from cv_bridge import CvBridge
 import cv2
-import json
-import base64
 import numpy as np
 import time
 
 class WebcamPublisher(Node):
     """
     ROS2 node that captures frames from a webcam and publishes them
-    to the /display_feed topic in the format expected by FeedInterface.
+    to the /cam_feed topic as sensor_msgs/Image messages.
     """
     def __init__(self):
         super().__init__('webcam_publisher')
         
-        # Create publisher for display feed
+        # Create publisher for image feed using the Image message type
         self.publisher = self.create_publisher(
-            String,
-            '/display_feed',
+            Image,
+            '/cam_feed',
             10
         )
         
@@ -28,14 +27,15 @@ class WebcamPublisher(Node):
         self.declare_parameter('frame_rate', 10.0)  # FPS
         self.declare_parameter('resolution_width', 640)
         self.declare_parameter('resolution_height', 480)
-        self.declare_parameter('camera_name', 'webcam')
         
         # Get parameters
         self.camera_id = self.get_parameter('camera_id').value
         self.frame_rate = self.get_parameter('frame_rate').value
         self.width = self.get_parameter('resolution_width').value
         self.height = self.get_parameter('resolution_height').value
-        self.camera_name = self.get_parameter('camera_name').value
+        
+        # Initialize OpenCV->ROS bridge
+        self.bridge = CvBridge()
         
         # Initialize webcam
         self.get_logger().info(f'Initializing webcam with ID: {self.camera_id}')
@@ -62,7 +62,7 @@ class WebcamPublisher(Node):
         self.get_logger().info('Webcam publisher initialized')
 
     def timer_callback(self):
-        """Capture a frame and publish it to the /display_feed topic."""
+        """Capture a frame and publish it to the /cam_feed topic as an Image message."""
         try:
             # Capture frame
             ret, frame = self.cap.read()
@@ -74,36 +74,18 @@ class WebcamPublisher(Node):
             # Convert to RGB for consistency (OpenCV uses BGR by default)
             frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             
-            # Method 1: Publish as base64-encoded string
-            # Convert to JPEG and then base64
-            _, buffer = cv2.imencode('.jpg', frame_rgb)
-            base64_data = base64.b64encode(buffer).decode('utf-8')
+            # Convert OpenCV image to ROS Image message
+            ros_image = self.bridge.cv2_to_imgmsg(frame_rgb, encoding="rgb8")
             
-            # Create message
-            msg_data = {
-                'target': 'David',
-                'name': self.camera_name,
-                'image': base64_data
-            }
+            # Set frame timestamp
+            ros_image.header.stamp = self.get_clock().now().to_msg()
+            # Optionally set a frame_id if needed
+            ros_image.header.frame_id = "camera_frame"
             
-            # Alternative method (uncomment to use):
-            # Method 2: Publish as raw image data with encoding
-            # msg_data = {
-            #     'name': self.camera_name,
-            #     'image': {
-            #         'data': base64.b64encode(frame_rgb.tobytes()).decode('utf-8'),
-            #         'height': self.height,
-            #         'width': self.width,
-            #         'encoding': 'rgb8'
-            #     }
-            # }
+            # Publish the image
+            self.publisher.publish(ros_image)
             
-            # Convert to JSON and publish
-            msg = String()
-            msg.data = json.dumps(msg_data)
-            self.publisher.publish(msg)
-            
-            self.get_logger().debug(f'Published frame with name: {self.camera_name}')
+            self.get_logger().debug('Published frame to /cam_feed')
             
         except Exception as e:
             self.get_logger().error(f'Error in timer callback: {str(e)}')

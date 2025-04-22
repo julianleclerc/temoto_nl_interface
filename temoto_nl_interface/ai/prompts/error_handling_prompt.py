@@ -12,6 +12,12 @@ Key Points:
   - message: A textual message to the user explaining the resolution or next step
   - actions: An array of action objects that will replace the original action_called
 
+- You have access to the UMRF Queue, which shows the sequence of actions planned after the error. When proposing a solution:
+  - Examine the existing queue of actions that follow the failed action
+  - Do not duplicate actions that already exist in the queue
+  - Only include actions that need to be modified or inserted before existing actions
+  - If an action in your solution has the same name as one already in the queue, it should replace only the failed action, not add a duplicate
+
 Input parameters:
 - Action Called: This is the action where the error was encountered. Your goal is to fix this action.
 - Error message: This is the error message that was generated when the action was called. You must solve this error.
@@ -51,6 +57,11 @@ Output Format:
 		{"system command 2": value}
 	]
 }
+
+When generating the "queue" array in your response:
+- Only include actions that should replace the failed action (the first action in the queue)
+- If your solution leads directly to actions already present in the queue, do not include those existing actions
+- Check if any action names in your solution match names already in the remaining queue and avoid duplication
 
 ## Parameter Validation and Default Values
 
@@ -345,6 +356,69 @@ EXPECTED OUTPUT:
     ],
     "system_cmd": []
 
+}
+
+Example 6:
+INPUT:
+Error Message: "Multiple plants detected, please specify which plant to navigate to."
+Action Called: {"GetCoordinates": {"input_parameters": {"target": {"pvf_type": "string", "pvf_value": "plant"}}, "output_parameters": {"pose": {"position": {"x": {"pvf_type": "number"}, "y": {"pvf_type": "number"}, "z": {"pvf_type": "number"}}, "orientation": {"r": {"pvf_type": "number"}, "p": {"pvf_type": "number"}, "y": {"pvf_type": "number"}}}}}}
+Upcoming Actions Queued: [{"NavigateTo": {"input_parameters": {"pose": {"position": {"x": {"pvf_type": "number"}, "y": {"pvf_type": "number"}, "z": {"pvf_type": "number"}}, "orientation": {"r": {"pvf_type": "number"}, "p": {"pvf_type": "number"}, "y": {"pvf_type": "number"}}}}, "output_parameters": {}}}, {"Inspect": {"input_parameters": {"inspect": {"pvf_type": "string", "pvf_value": "plant"}}, "output_parameters": {"inspection_result": {"pvf_type": "string"}}}}]
+User Response: "go to the plant near the fridge"
+
+EXPECTED OUTPUT:
+{
+    "success": "true",
+    "message": "I'll get the coordinates of the plant near the fridge. The existing navigation and inspection actions will then be executed.",
+    "queue": [
+        {
+            "GetCoordinates": {
+                "input_parameters": {
+                    "target": {"pvf_type": "string", "pvf_value": "plant near fridge"}
+                },
+                "output_parameters": {
+                    "pose": {
+                        "position": {
+                            "x": {"pvf_type": "number"},
+                            "y": {"pvf_type": "number"},
+                            "z": {"pvf_type": "number"}
+                        },
+                        "orientation": {
+                            "r": {"pvf_type": "number"},
+                            "p": {"pvf_type": "number"},
+                            "y": {"pvf_type": "number"}
+                        }
+                    }
+                }
+            }
+        }
+    ],
+    "system_cmd": []
+}
+
+Example 7:
+INPUT:
+Error Message: "Object not recognized during inspection. Cannot identify what was spotted."
+Action Called: {"Inspect": {"input_parameters": {"inspect": {"pvf_type": "string", "pvf_value": "suspicious object"}}, "output_parameters": {"inspection_result": {"pvf_type": "string"}}}}
+Upcoming Actions Queued: [{"GetCoordinates": {"input_parameters": {"target": {"pvf_type": "string", "pvf_value": "suspicious object"}}, "output_parameters": {"pose": {"position": {"x": {"pvf_type": "number"}, "y": {"pvf_type": "number"}, "z": {"pvf_type": "number"}}, "orientation": {"r": {"pvf_type": "number"}, "p": {"pvf_type": "number"}, "y": {"pvf_type": "number"}}}}}}, {"NavigateTo": {"input_parameters": {"pose": {"position": {"x": {"pvf_type": "number"}, "y": {"pvf_type": "number"}, "z": {"pvf_type": "number"}}, "orientation": {"r": {"pvf_type": "number"}, "p": {"pvf_type": "number"}, "y": {"pvf_type": "number"}}}}, "output_parameters": {}}}, {"Inspect": {"input_parameters": {"inspect": {"pvf_type": "string", "pvf_value": "suspicious object"}}, "output_parameters": {"inspection_result": {"pvf_type": "string"}}}}]
+User Response: "go towards the suspicious object"
+
+EXPECTED OUTPUT:
+{
+    "success": "true",
+    "message": "I'll first identify the suspicious object with a general inspection, then proceed to get its coordinates and navigate to it for a closer look.",
+    "queue": [
+        {
+            "Inspect": {
+                "input_parameters": {
+                    "inspect": {"pvf_type": "string", "pvf_value": "unidentified object"}
+                },
+                "output_parameters": {
+                    "inspection_result": {"pvf_type": "string"}
+                }
+            }
+        }
+    ],
+    "system_cmd": []
 }
 
 Important:

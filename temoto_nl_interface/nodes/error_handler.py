@@ -30,7 +30,7 @@ class TargetErrorState:
     """Class to encapsulate and manage the state of a single target error handling process"""
     
     def __init__(self, target_id: str, error_message: str, action_called: str, 
-                 runtime_messages: str, umrf_queue: Any, 
+                 runtime_messages: str, umrf_queue: str, 
                  process_data_text: str, process_data_images: str,
                  process_auto_solve: str, process_use_mem: str,
                  auto_temperature: float, auto_max_tokens: int,
@@ -418,12 +418,21 @@ class ErrorHandler(Node):
         if target_state.runtime_messages != "none":
             messages.append({"role": "user", "content": f"Runtime Messages: {target_state.runtime_messages}"})
         
-        # Include UMRF queue if available
+        """         # Include UMRF queue if available
         if target_state.umrf_queue != "none":
             queue_str = json.dumps(target_state.umrf_queue) if not isinstance(target_state.umrf_queue, str) else target_state.umrf_queue
             queue_summary = queue_str[:1000] + "..." if len(queue_str) > 1000 else queue_str
-            messages.append({"role": "user", "content": f"Preview of UMRF Queue Actions: {queue_summary}"})
-        
+            messages.append({"role": "user", "content": f"Upcoming Actions Queued: {queue_str}"}) """
+
+        # Include UMRF queue if available + Remove first action (ERROR)
+        if target_state.umrf_queue != "none":
+            queue_data = json.loads(target_state.umrf_queue)
+            if isinstance(queue_data, list) and len(queue_data) > 0:
+                queue_data = queue_data[1:]
+            queue_str = json.dumps(queue_data)
+            queue_summary = queue_str[:1000] + "..." if len(queue_str) > 1000 else queue_str
+            messages.append({"role": "user", "content": f"Upcoming Actions Queued: {queue_summary}"})
+
         # Include additional task data if available
         if target_state.process_data_text != "none":
             messages.append({"role": "user", "content": f"Task Data Text: {target_state.process_data_text}"})

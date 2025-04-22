@@ -139,6 +139,10 @@ class MemoryNode(Node):
             10,
             callback_group=self.subscription_callback_group
         )
+        
+        
+        ## Add to memory content in data
+
 
         self.get_logger().info('Memory Node is active')
     

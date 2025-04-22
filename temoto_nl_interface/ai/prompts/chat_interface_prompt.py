@@ -276,7 +276,7 @@ Response:
     "system_cmd": []
 }
 
-### Example 2: Using Memory to Resolve Ambiguity
+### Example 2: Using Memory to Resolve Ambiguity (only return ambiguity in case memory or user informs there might be several similar objects present)
 User request: "Go to the chair"
 Memory: Contains information about multiple chairs
 
@@ -287,7 +287,60 @@ Response:
     "system_cmd": []
 }
 
-### Example 3: Conversation Without Actions
+### Example 3: No memory available to provide context
+
+User request: "Go to the plant"
+Memory: None or empty
+
+Response:
+{
+    "message_response": "Getting the coordinates of the plant and navigating to it.",
+    "queue": [
+        {
+            "GetCoordinates": {
+                "input_parameters": {
+                    "target": {"pvf_type": "string", "pvf_value": "plant"}
+                },
+                "output_parameters": {
+                    "pose": {
+                        "position": {
+                            "x": {"pvf_type": "number"},
+                            "y": {"pvf_type": "number"},
+                            "z": {"pvf_type": "number"}
+                        },
+                        "orientation": {
+                            "r": {"pvf_type": "number"},
+                            "p": {"pvf_type": "number"},
+                            "y": {"pvf_type": "number"}
+                        }
+                    }
+                }
+            }
+        },
+        {
+            "NavigateTo": {
+                "input_parameters": {
+                    "pose": {
+                        "position": {
+                            "x": {"pvf_type": "number"},
+                            "y": {"pvf_type": "number"},
+                            "z": {"pvf_type": "number"}
+                        },
+                        "orientation": {
+                            "r": {"pvf_type": "number"},
+                            "p": {"pvf_type": "number"},
+                            "y": {"pvf_type": "number"}
+                        }
+                    }
+                },
+                "output_parameters": {}
+            }
+        }
+    ],
+    "system_cmd": []
+}
+
+### Example 4: Conversation Without Actions
 User request: "Hey, how are you?"
 
 Response:
@@ -297,7 +350,7 @@ Response:
     "system_cmd": []
 }
 
-### Example 4: Removing An Action
+### Example 5: Removing An Action
 User request: "Remove the first element of the list"
 
 Response:
@@ -309,7 +362,7 @@ Response:
     ]
 }
 
-### Example 5: Getting Coordinates with Memory Context
+### Example 6: Getting Coordinates with Memory Context
 User request: "Get coordinates of chair next to fridge"
 
 Response:
@@ -339,7 +392,7 @@ Response:
     "system_cmd": []
 }
 
-### Example 6: Retrying a Failed Action
+### Example 7: Retrying a Failed Action
 User request: "Try again"
 
 Response:
@@ -351,7 +404,7 @@ Response:
     ]
 }
 
-### Example 7: Adding information to memory
+### Example 8: Adding information to memory
 User: "There is a chair in the kitchen"
 Response:
 {
@@ -362,7 +415,7 @@ Response:
     ]
 }
 
-### Example 8: Inspecting several elements
+### Example 9: Inspecting several elements
 User: "Inspect each plant"
 Memory: 3 plants are available, plant next to the fridge, plant next to the chair, plant next to the door
 Response:

@@ -76,7 +76,7 @@ class TargetUMRF:
     def reset_state(self):
         """Reset the target's state and queues."""
         self.graph_state = "inactive"
-        self.stop_status = False
+        self.stop_status = False 
         self.hold_status = False
         self.hold_queue_json = []
         self.completed_json = []
@@ -120,8 +120,8 @@ class UMRF_PLANNER(Node):
         self.target_manager = TargetManager()
 
         # Define node I/O
-        self.chat_action = self.create_subscription(String,'chat_action',self.chat_listener,10)
-        self.error_handling_message = self.create_publisher(String, '/error_handling_message',10)
+        self.chat_action = self.create_subscription(String,'chat_action',self.chat_listener,10) 
+        self.error_handling_message = self.create_publisher(String, '/error_handling_message',10) 
         self.error_queue_update = self.create_subscription(String,'/umrf_correction',self.umrf_graph_correction,10)
         self.umrf_feedback_sub = self.create_subscription(UmrfGraphFeedback,'/umrf_graph_feedback',self.umrf_feedback,10)
         self.umrf_feedback_pub = self.create_publisher(UmrfGraphFeedback,'/umrf_graph_feedback',10)
@@ -208,7 +208,7 @@ class UMRF_PLANNER(Node):
                 self.get_logger().info(f'graph is inactive, starting graph')
                 msg = UmrfGraphStart()
 
-                msg.umrf_graph_name = graph_name
+                msg.umrf_graph_name = ""
                 msg.name_match_required = False
                 msg.targets = [target]
                 msg.umrf_graph_json = json.dumps(umrf_graph)
@@ -238,7 +238,9 @@ class UMRF_PLANNER(Node):
                     # Add new actions to the target's queue
                     target_umrf.add_to_queue(queue_input_json["queue"])
                     self.get_logger().info(f'Added {len(queue_input_json["queue"])} items to queue for target: {target}')
-                    self.update_json_queue(target)
+                    
+                    if target_umrf.hold_status == False:
+                        self.update_json_queue(target)
             else:
                 self.get_logger().error(f'Target "{target}" not found in target manager.')
         else:
@@ -630,8 +632,6 @@ class UMRF_PLANNER(Node):
             self.system_commands(system_input_json, target)
         else:
             self.get_logger().warning('No "system_cmd" key found or "system_cmd" is empty in the received JSON, resuming process.')
-            # Resume the process
-            self.start(0, target)
 
 
 
@@ -794,7 +794,6 @@ class UMRF_PLANNER(Node):
             if 'target' in locals():
                 self.stop(0, target)
 
-        return
         ### ERROR HANDLING
         self.get_logger().info(f"Starting error handling process")
         try:
@@ -855,7 +854,7 @@ class UMRF_PLANNER(Node):
                                     self.get_logger().warning(f"JSON decode error: {str(json_err)}")
                                     error_message = latest_message
                                     self.get_logger().debug(f"Using raw message as error message")
-
+            
             if error_state:
                 self.get_logger().info(f"Preparing error handling for detected error")
                 # Get the target from the manager
@@ -873,7 +872,7 @@ class UMRF_PLANNER(Node):
                 error_handling_message = {
                     "error_message": error_message,
                     "action_called": error_action, 
-                    "umrf_queue": {"queue_json": target_umrf.queue_json} if target_umrf else {},
+                    "umrf_queue": json.dumps(target_umrf.queue_json) if target_umrf else "[]",
                     "target": target
                 }
                 self.get_logger().debug(f"Basic error message prepared")                
@@ -981,8 +980,8 @@ class UMRF_PLANNER(Node):
                         "instance_id": instance_id - 1,
                         "required": True,
                         "conditions": [
-                            "on_true -> ignore",
-                            "on_false -> ignore",
+                            "on_true -> run",
+                            "on_false -> run",
                             "on_stopped -> ignore",
                             "on_error -> ignore"
                         ]
@@ -1029,8 +1028,8 @@ class UMRF_PLANNER(Node):
                         "instance_id": instance_id - 1,
                         "required": True,
                         "conditions": [
-                            "on_true -> ignore",
-                            "on_false -> ignore",
+                            "on_true -> run",
+                            "on_false -> run",
                             "on_stopped -> ignore",
                             "on_error -> ignore"
                         ]

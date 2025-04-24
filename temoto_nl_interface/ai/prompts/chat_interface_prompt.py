@@ -96,9 +96,9 @@ To prevent system failures due to missing parameters:
    - Output Parameters: None (use empty object `{}`)
 
 3. **Inspect**
-   - Purpose: Inspect a specific object (the object must be in front of the robot)
+   - Purpose: Use camera to inspect a specific object and raise concerns (either general inspection or check for presence) 
    - Input Parameters:
-     "inspect": {"pvf_type": "string", "pvf_value": "object name"}
+     "inspect": {"pvf_type": "string", "pvf_value": "details about type and object of inspection"}
    - Output Parameters:
      "inspection_result": {"pvf_type": "string"}
 
@@ -182,7 +182,7 @@ The output parameters will define the values of the variables at the specific hi
 ### Inspect Template
 "Inspect": {
     "input_parameters": {
-        "inspect": {"pvf_type": "string", "pvf_value": "object name"}
+        "inspect": {"pvf_type": "string", "pvf_value": "details about type and object of inspection"}
     },
     "output_parameters": {
         "inspection_result": {"pvf_type": "string"}
@@ -265,7 +265,7 @@ Response:
         {
             "Inspect": {
                 "input_parameters": {
-                    "inspect": {"pvf_type": "string", "pvf_value": "chair"}
+                    "inspect": {"pvf_type": "string", "pvf_value": "general chair inspection"}
                 },
                 "output_parameters": {
                     "inspection_result": {"pvf_type": "string"}
@@ -415,7 +415,7 @@ Response:
     ]
 }
 
-### Example 9: Inspecting several elements
+### Example 9: General inspection several elements
 User: "Inspect each plant"
 Memory: 3 plants are available, plant next to the fridge, plant next to the chair, plant next to the door
 Response:
@@ -466,7 +466,7 @@ Response:
         {
             "Inspect": {
                 "input_parameters": {
-                    "inspect": {"pvf_type": "string", "pvf_value": "plant"}
+                    "inspect": {"pvf_type": "string", "pvf_value": "general plant inspection"}
                 },
                 "output_parameters": {
                     "inspection_result": {"pvf_type": "string"}
@@ -516,7 +516,7 @@ Response:
         {
             "Inspect": {
                 "input_parameters": {
-                    "inspect": {"pvf_type": "string", "pvf_value": "plant"}
+                    "inspect": {"pvf_type": "string", "pvf_value": "general plant inspection"}
                 },
                 "output_parameters": {
                     "inspection_result": {"pvf_type": "string"}
@@ -566,7 +566,7 @@ Response:
         {
             "Inspect": {
                 "input_parameters": {
-                    "inspect": {"pvf_type": "string", "pvf_value": "plant"}
+                    "inspect": {"pvf_type": "string", "pvf_value": "general plant inspection"}
                 },
                 "output_parameters": {
                     "inspection_result": {"pvf_type": "string"}
@@ -576,6 +576,68 @@ Response:
     ],
     "system_cmd": []
 }
+
+### Example 10: General inspection several elements
+User: "Check the garage for any package"
+Response:
+Response:
+{
+    "message_response": "Checking the garage for any packages",
+    "queue": [
+        {
+            "GetCoordinates": {
+                "input_parameters": {
+                    "target": {"pvf_type": "string", "pvf_value": "garage"}
+                },
+                "output_parameters": {
+                    "pose": {
+                        "position": {
+                            "x": {"pvf_type": "number"},
+                            "y": {"pvf_type": "number"},
+                            "z": {"pvf_type": "number"}
+                        },
+                        "orientation": {
+                            "r": {"pvf_type": "number"},
+                            "p": {"pvf_type": "number"},
+                            "y": {"pvf_type": "number"}
+                        }
+                    }
+                }
+            }
+        },
+        {
+            "NavigateTo": {
+                "input_parameters": {
+                    "pose": {
+                        "position": {
+                            "x": {"pvf_type": "number"},
+                            "y": {"pvf_type": "number"},
+                            "z": {"pvf_type": "number"}
+                        },
+                        "orientation": {
+                            "r": {"pvf_type": "number"},
+                            "p": {"pvf_type": "number"},
+                            "y": {"pvf_type": "number"}
+                        }
+                    }
+                },
+                "output_parameters": {}
+            }
+        },
+        {
+            "Inspect": {
+                "input_parameters": {
+                    "inspect": {"pvf_type": "string", "pvf_value": "check presence of package"}
+                },
+                "output_parameters": {
+                    "inspection_result": {"pvf_type": "string"}
+                }
+            }
+        }
+    ],
+    "system_cmd": []
+}
+
 
 Remember: Your response must be valid JSON with all property names in double quotes. Do not add any text before or after the JSON object, and make sure all required parameters are included with their complete structure.
 """

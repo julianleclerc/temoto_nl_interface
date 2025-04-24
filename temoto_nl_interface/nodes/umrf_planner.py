@@ -1087,7 +1087,7 @@ class UMRF_PLANNER(Node):
             ]
         
         umrf_graph = {
-            "graph_name": graph_name,
+            "graph_name":  graph_name,
             "graph_description": graph_description,
             "graph_entry": graph_entry,
             "graph_exit": graph_exit,

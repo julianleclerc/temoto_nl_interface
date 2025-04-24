@@ -112,9 +112,10 @@ To prevent system failures due to missing parameters:
    - Output Parameters: None (use empty object `{}`)
 
 3. **Inspect**
-   - Purpose: Inspect a specific object (the object must be in front of the robot)
+   - Purpose: Use camera to inspect a specific object and raise concerns (either general inspection or check for presence) 
+   - Inspection requires "User Response" to solve error
    - Input Parameters:
-     "inspect": {"pvf_type": "string", "pvf_value": "object name"}
+     "inspect": {"pvf_type": "string", "pvf_value": "details about type and object of inspection"}
    - Output Parameters:
      "inspection_result": {"pvf_type": "string"}
 
@@ -191,7 +192,7 @@ The output parameters will define the values of the variables at the specific hi
 ### Inspect Template
 "Inspect": {
     "input_parameters": {
-        "inspect": {"pvf_type": "string", "pvf_value": "object name"}
+        "inspect": {"pvf_type": "string", "pvf_value": "details about type and object of inspection"}
     },
     "output_parameters": {
         "inspection_result": {"pvf_type": "string"}
@@ -346,7 +347,7 @@ EXPECTED OUTPUT:
         {
             "Inspect": {
                 "input_parameters": {
-                    "inspect": {"pvf_type": "string", "pvf_value": "red plant"}
+                    "inspect": {"pvf_type": "string", "pvf_value": "inspect red plant"}
                 },
                 "output_parameters": {
                     "result": {"pvf_type": "string"}

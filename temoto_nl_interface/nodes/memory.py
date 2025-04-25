@@ -214,7 +214,7 @@ class MemoryNode(Node):
             temperature = 0.2
             max_tokens = 1024
             frequency_penalty = 0
-            presence_penalty = 0.1
+            presence_penalty = 0.0
 
             # Call AI to handle the request
             self.get_logger().info("Calling AI to analyze memory request...")

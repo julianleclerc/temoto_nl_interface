@@ -29,7 +29,7 @@ def AI_Language_Prompt(messages, TEMPERATURE, MAX_TOKENS, FREQUENCY_PENALTY, PRE
             messages=messages,
             temperature=TEMPERATURE,
             max_tokens=MAX_TOKENS,
-            top_p=1,
+            top_p=0.3,
             frequency_penalty=FREQUENCY_PENALTY,
             presence_penalty=PRESENCE_PENALTY,
         )
@@ -57,7 +57,7 @@ def AI_Image_Prompt(messages, TEMPERATURE, MAX_TOKENS, FREQUENCY_PENALTY, PRESEN
             messages=messages,
             temperature=TEMPERATURE,
             max_tokens=MAX_TOKENS,
-            top_p=1,
+            top_p=0.6,
             frequency_penalty=FREQUENCY_PENALTY,
             presence_penalty=PRESENCE_PENALTY,
         )

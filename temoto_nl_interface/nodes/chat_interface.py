@@ -355,10 +355,10 @@ class ChatInterface(Node):
         try:
             assistant_reply = ai_core.AI_Image_Prompt(
                 messages,
-                TEMPERATURE=0.3,
-                MAX_TOKENS=2000,
+                TEMPERATURE=0.1,
+                MAX_TOKENS=2048,
                 FREQUENCY_PENALTY=0.0,
-                PRESENCE_PENALTY=0.3
+                PRESENCE_PENALTY=0.0
             )
             tac = time.time()
             self.get_logger().info(f'Received response in {tac - tic:.2f} seconds')

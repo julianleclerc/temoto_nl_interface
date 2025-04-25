@@ -572,6 +572,11 @@ class UMRF_PLANNER(Node):
                 if "queue" in queued_json and not self.is_empty(queued_json["queue"]):
                     queue_input_json = {"queue": queued_json["queue"]}
                     self.add_to_queue(queue_input_json, target)
+                
+                # If nothing is provided, skip this
+                if ("system_cmd" not in queued_json or self.is_empty(queued_json["system_cmd"])) and \
+                ("queue" not in queued_json or self.is_empty(queued_json["queue"])):
+                    self.skip(0, target)
             
             # Update hold status for this target only
             target_umrf.set_hold(False)

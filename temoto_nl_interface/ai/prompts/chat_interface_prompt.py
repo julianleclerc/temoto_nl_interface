@@ -137,7 +137,7 @@ Before finalizing your response, verify that:
 
 The output parameters will define the values of the variables at the specific hiarchy, this is used to transmit output parameters from one function to another
 
-## Command Templates (Copy-Paste Ready)
+## Command Templates (Copy-Paste Ready) - Important: For the used actions, ensure all parameters are present in the graph generated
 
 ### GetCoordinates Template
 "GetCoordinates": {

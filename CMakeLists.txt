@@ -28,6 +28,7 @@ set(PYTHON_SCRIPTS
   display_interface
   cam_publisher
   fake_nav
+  cam_publisher_sim
 )
 
 # Install Python scripts as executables

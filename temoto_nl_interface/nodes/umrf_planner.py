@@ -170,54 +170,34 @@ class UMRF_PLANNER(Node):
         graph_name = target_umrf.graph_name
         graph_state = target_umrf.graph_state
 
-        # If stopped, publish on feedback for visual feedback
-        if target_umrf.stop_status:
+            # Publish Modified Graph
+        if graph_state == "active":
             self.get_logger().info(f'graph is active, modyfing graph')
-            msg = UmrfGraphFeedback()
+            msg = UmrfGraphModify()
 
-            msg.actor = target
+            msg.umrf_graph_name = graph_name
+            msg.targets = [target]
+            msg.modified_graph = json.dumps(umrf_graph)
+            msg.continue_from = f"{resume_action}_{resume_id}"
 
-            # set each action in graph to state UNITIALISED
-            for action in umrf_graph["actions"]:
-                action["state"] = "UNINITIALIZED"
+            self.umrf_modify_publisher.publish(msg)
+            self.get_logger().info(f'Published: {msg}')
+                    
+        # Publish Starting Graph
+        else: 
+            self.get_logger().info(f'graph is inactive, starting graph')
+            msg = UmrfGraphStart()
 
-            # set graph state to paused
-            umrf_graph["graph_state"] = "PAUSED"
-            
-            msg.history = [json.dumps(umrf_graph)]
+            msg.umrf_graph_name = ""
+            msg.name_match_required = False
+            msg.targets = [target]
+            msg.umrf_graph_json = json.dumps(umrf_graph)
 
-            self.umrf_feedback_pub.publish(msg)
+            self.umrf_start_publisher.publish(msg)
             self.get_logger().info(f'Published: {msg}')
 
-        else:
-            # Publish Modified Graph
-            if graph_state == "active":
-                self.get_logger().info(f'graph is active, modyfing graph')
-                msg = UmrfGraphModify()
-
-                msg.umrf_graph_name = graph_name
-                msg.targets = [target]
-                msg.modified_graph = json.dumps(umrf_graph)
-                msg.continue_from = f"{resume_action}_{resume_id}"
-
-                self.umrf_modify_publisher.publish(msg)
-                self.get_logger().info(f'Published: {msg}')
-                        
-            # Publish Starting Graph
-            else: 
-                self.get_logger().info(f'graph is inactive, starting graph')
-                msg = UmrfGraphStart()
-
-                msg.umrf_graph_name = ""
-                msg.name_match_required = False
-                msg.targets = [target]
-                msg.umrf_graph_json = json.dumps(umrf_graph)
-
-                self.umrf_start_publisher.publish(msg)
-                self.get_logger().info(f'Published: {msg}')
-
-                # Update the action engine to active status
-                target_umrf.set_graph_state("active")    
+            # Update the action engine to active status
+            target_umrf.set_graph_state("active")    
 
     def add_to_queue(self, queue_input_json, target):
         """

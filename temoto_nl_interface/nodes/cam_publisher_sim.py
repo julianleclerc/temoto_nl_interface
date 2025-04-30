@@ -19,7 +19,7 @@ class StaticImagePublisher(Node):
         # Create publisher for image feed using the Image message type
         self.publisher = self.create_publisher(
             Image,
-            '/cam_feed',
+            '/display_feed',
             10
         )
         

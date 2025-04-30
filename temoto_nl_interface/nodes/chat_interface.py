@@ -8,83 +8,100 @@ from std_msgs.msg import String
 import json
 import time
 import threading
-import queue
-from concurrent.futures import ThreadPoolExecutor
 from nl_interface_msgs.srv import Chat
 
 from temoto_nl_interface.ai import ai_core
 from temoto_nl_interface.ai.prompts import chat_interface_prompt
 
+# Configuration constants
 MAX_CONTEXT = 10  # Sets number of past questions considered
-MAX_CONCURRENT_REQUESTS = 8
+MEMORY_TIMEOUT = 3.0 
 
 class Target:
+    """Represents a single conversation target with thread-safe history management"""
     def __init__(self, target_name):
         self.target_name = target_name
         self.history = []
         self.history_lock = threading.Lock()
+        self.last_access_time = time.time()
 
     def add_to_history(self, role, message):
+        """Add a message to the target's history in a thread-safe manner"""
         with self.history_lock:
             timestamp = time.time()
+            self.last_access_time = timestamp
             self.history.append(json.dumps({
                 "role": role, 
                 "content": f"time: {timestamp}, target: {self.target_name}, {role}: {message}", 
                 "time": timestamp
             }))
+            # Limit history size
             if len(self.history) > MAX_CONTEXT*2:
                 self.history = self.history[-MAX_CONTEXT*2:]
 
     def get_history(self):
+        """Get a copy of the target's history in a thread-safe manner"""
         with self.history_lock:
             return list(self.history)
 
     def get_target_name(self):
+        """Get the target's name"""
         return self.target_name
     
+    def get_last_access_time(self):
+        """Get the time of last access to this target"""
+        with self.history_lock:
+            return self.last_access_time
+    
 class TargetManager:
-    def __init__(self):
+    """Manages multiple conversation targets with thread-safety"""
+    def __init__(self, logger):
         self.targets = {}
         self.target_lock = threading.Lock()
+        self.logger = logger
 
     def get_or_create_target(self, target_name):
-        """Get an existing target or create it if it doesn't exist in a thread-safe manner."""
+        """Get an existing target or create it if it doesn't exist in a thread-safe manner"""
         with self.target_lock:
             if target_name not in self.targets:
                 self.targets[target_name] = Target(target_name)
+                self.logger.info(f"Created new target: {target_name}")
             return self.targets[target_name]
+    
+    def get_all_targets(self):
+        """Get a list of all target names"""
+        with self.target_lock:
+            return list(self.targets.keys())
             
     def shutdown(self):
         """Clean up resources during shutdown"""
         with self.target_lock:
+            target_count = len(self.targets)
             for target in self.targets.values():
                 target.history.clear()
-                target.history_lock = None
-                self.get_logger().info(f"Cleared history for target: {target.get_target_name()}")
-        self.targets.clear()
-        self.target_lock = None
-        self.get_logger().info("TargetManager shutdown complete")
+            self.targets.clear()
+            self.logger.info(f"Cleared {target_count} targets during shutdown")
         
 class ChatInterface(Node):
     def __init__(self):
         super().__init__('chat_interface_node')
         
+        # Logger configuration - control log levels
+        self.get_logger().set_level(rclpy.logging.LoggingSeverity.INFO)
+        
         # Create callback groups for concurrent callback execution
         self.input_callback_group = ReentrantCallbackGroup()
         self.publisher_callback_group = ReentrantCallbackGroup()
-        self.memory_response_callback_group = ReentrantCallbackGroup()
+        self.memory_callback_group = ReentrantCallbackGroup()
         
-        # Initialize the target manager
-        self.target_manager = TargetManager()
+        # Initialize the target manager with logger
+        self.target_manager = TargetManager(self.get_logger())
         
-        # Create a request queue
-        self.request_queue = queue.Queue()
-        
-        # Subscribe to enqueue_request with callback group
+        # Subscribe to chat input with callback group - direct processing
         self.sub = self.create_subscription(
             String, 
             'chat_interface_input', 
-            self.enqueue_request, 
+            self.handle_chat, 
             10,
             callback_group=self.input_callback_group
         )
@@ -97,16 +114,6 @@ class ChatInterface(Node):
             callback_group=self.publisher_callback_group
         )
 
-        # Create thread pool for processing requests with increased capacity
-        self.thread_pool = ThreadPoolExecutor(max_workers=MAX_CONCURRENT_REQUESTS)
-        
-        # Flag to signal worker thread to stop
-        self.shutdown_flag = threading.Event()
-
-        # Start worker thread to process the queue
-        self.processing_thread = threading.Thread(target=self.process_queue, daemon=True)
-        self.processing_thread.start()
-
         # Create action publisher with callback group
         self.umrf_actions_pub = self.create_publisher(
             String, 
@@ -115,72 +122,35 @@ class ChatInterface(Node):
             callback_group=self.publisher_callback_group
         )
         
-        # Import prompt.
+        # Import prompt
         try:
             self.INSTRUCTIONS = chat_interface_prompt.getprompt()
-            self.get_logger().debug('Fetched Prompt')
+            self.get_logger().debug('Fetched prompt template successfully')
         except Exception as e:
             self.get_logger().error(f'Error loading prompt: {e}')
-            self.shutdown_flag.set()
-            self.shutdown()
             return
         
-        # Service client for get mem info
+        # Service client for memory
         self.get_logger().debug('Creating service client for memory')
         self.memory_available = True
-        self.memory_response = None
-        self.memory_response_ready = threading.Event()
         
         self.getMemory_client = self.create_client(
             Chat, 
             'get_memory', 
-            callback_group=self.memory_response_callback_group
+            callback_group=self.memory_callback_group
         )
         
         if not self.getMemory_client:
             self.memory_available = False
             self.get_logger().error('Failed to create getMemory client')
 
-        self.get_logger().info(f'Chat_interface node is active with {MAX_CONCURRENT_REQUESTS} concurrent workers.')
-
-    def enqueue_request(self, msg):
-        """Add incoming messages to the processing queue."""
-        try:
-            # Check if message is valid before adding to queue
-            json.loads(msg.data)
-            self.get_logger().info(f"Received chat message, adding to queue")
-            self.request_queue.put(msg)
-            self.get_logger().debug(f"Queue size: {self.request_queue.qsize()}")
-        except json.JSONDecodeError as e:
-            self.get_logger().error(f"Invalid message format, not adding to queue: {e}")
-            error_msg = String()
-            error_msg.data = json.dumps({"targets": [], "type": "error", "message": f"Invalid message format: {e}"})
-            self.pub.publish(error_msg)
-
-    def process_queue(self):
-        """Process messages from the queue using the thread pool."""
-        while not self.shutdown_flag.is_set() and rclpy.ok():
-            try:
-                # Get message from queue (blocking with timeout)
-                msg = self.request_queue.get(timeout=1.0)
-                
-                # Submit task to thread pool
-                self.thread_pool.submit(self.handle_chat, msg)
-                
-                # Mark task as done
-                self.request_queue.task_done()
-            except queue.Empty:
-                # No message in queue, continue waiting
-                continue
-            except Exception as e:
-                self.get_logger().error(f"Error in queue processing: {e}")
-
-        self.get_logger().info("Queue processing thread exiting")
+        self.get_logger().info('Chat interface node is active with direct processing')
 
     def handle_chat(self, msg):
-        """Process chat request in a worker thread."""
+        """Process incoming chat messages directly in callback thread"""
         thread_id = threading.get_ident() 
-        self.get_logger().info(f"Processing chat message in thread {thread_id}: {msg.data}")
+        start_time = time.time()
+        self.get_logger().info(f"Processing chat message in thread {thread_id}")
 
         # Initialize variables that might be referenced in exception handlers
         targets_list = []
@@ -188,165 +158,182 @@ class ChatInterface(Node):
         error_response = None 
 
         try:
-            request_message_str = msg.data
-            request_message_json = json.loads(request_message_str)
-            request_message = request_message_json.get("message", "")
-            targets_list = request_message_json.get("targets", [])
-            message_type = request_message_json.get("type", "request")
+            # Extract request data
+            request_data = self.parse_request_message(msg.data)
+            if not request_data:
+                return
+                
+            request_message = request_data.get("message", "")
+            targets_list = request_data.get("targets", [])
+            message_type = request_data.get("type", "request")
 
-            # Check for request type
-            if message_type != "request":
-                self.get_logger().warn('Not a request message, ignoring.')
+            # Validate the request
+            if not self.validate_request(message_type, request_message, targets_list):
                 return
             
-            # Handle empty messages.
-            if not request_message:
-                self.get_logger().warn('Received empty message.')
-                error_msg = String()
-                error_msg.data = json.dumps({"targets": targets_list, "type": "error", "message": "No message received."})
-                self.pub.publish(error_msg)
-                return
-
-            # Process targets and retrieve or create them
-            target_objects = []
-            for target_name in targets_list:
-                target = self.target_manager.get_or_create_target(target_name)
-                target_objects.append(target)
-
-            # If no targets specified 
+            # Process targets and create conversation context
+            target_objects = self.prepare_target_objects(targets_list)
             if not target_objects:
-                self.get_logger().warn('No targets specified.')
-                error_msg = String()
-                error_msg.data = json.dumps({"targets": [], "type": "error", "message": "No targets specified."})
-                self.pub.publish(error_msg)
                 return
-
-            # Add the message to each target's history
-            for target in target_objects:
-                target.add_to_history("user", request_message)
-
-            # Collect conversation history from all targets
-            conversation_history = []
-            for target in target_objects:
-                target_history = target.get_history()
-                if target_history:
-                    self.get_logger().debug(f'Adding target history: {target_history}')
-                    conversation_history.extend(target_history)
-                else:
-                    self.get_logger().warn(f'No history for target: {target.get_target_name()}')
-
-            # Order history by time with error handling
-            try:
-                conversation_history.sort(key=lambda x: json.loads(x).get("time", 0))
-            except json.JSONDecodeError as e:
-                self.get_logger().error(f"Failed to sort history by time: {e}")
-                # Continue with unsorted history rather than failing
+                
+            # Update target histories
+            self.update_target_histories(target_objects, "user", request_message)
             
-            self.get_logger().debug(f'Ordered conversation history: {conversation_history}')
-             
-            # Compile messages for the AI
-            # Start with system instructions.
-            messages = [
-                {"role": "system", "content": self.INSTRUCTIONS},
-            ]
-
-            # Add previous conversation history.
-            if conversation_history:
-                recent_history = []
-                # Use consistent number of messages 
-                messages_to_include = min(len(conversation_history), MAX_CONTEXT*2)
-                # Convert JSON strings back to dictionaries for the API
-                for history_item in conversation_history[-messages_to_include:]:
-                    try:
-                        history_dict = json.loads(history_item)
-                        recent_history.append(history_dict)
-                    except json.JSONDecodeError:
-                        self.get_logger().warn(f"Failed to parse history item: {history_item}")
-                        
-                self.get_logger().debug(f'Adding target conversational history: {recent_history}')
-                messages.extend(recent_history)
-
-            # Add the new user message.
-            self.get_logger().debug(f'Appending request message: {request_message}')
-            messages.append({"role": "user", "content": request_message})
-
-            # Add memory to the prompt if available
-            if self.memory_available and self.getMemory_client.service_is_ready():
-                self.get_logger().debug('Fetching memory information')
-                
-                # Reset memory response state
-                self.memory_response = None
-                self.memory_response_ready.clear()
-                
-                # Prepare request
-                memory_request = Chat.Request()
-                memory_request.message = json.dumps({"targets": targets_list, "type": "memory"})
-                
-                # Send request asynchronously
-                future = self.getMemory_client.call_async(memory_request)
-                future.add_done_callback(self.memory_callback)
-                
-                # Wait for memory response with timeout
-                if self.memory_response_ready.wait(timeout=5.0):
-                    if self.memory_response:
-                        # Use "system" role instead of "memory" since "memory" is not supported
-                        messages.append({"role": "system", "content": f"Memory information: {self.memory_response}"})
-                        self.get_logger().debug('Memory information added to messages as system message')
-                    else:
-                        # Skip adding memory info if it failed
-                        self.get_logger().warn('Memory request failed, not adding to messages')
-                else:
-                    self.get_logger().warn('Memory request timed out, not adding to messages')
-            else:
-                self.get_logger().debug('Memory not available, skipping memory fetch.')
+            # Build conversation context
+            messages = self.build_conversation_context(target_objects, request_message)
             
-            # Generate chat response with the collected messages
-            self.generate_chat_response(messages, targets_list, target_objects)
+            # Fetch memory if available (non-blocking)
+            memory_content = self.fetch_memory_async(targets_list)
+            if memory_content:
+                messages.append({"role": "system", "content": f"Memory information: {memory_content}"})
+            
+            # Generate and process the response
+            self.generate_and_process_response(messages, targets_list, target_objects)
+            
+            # Log completion time
+            processing_time = time.time() - start_time
+            self.get_logger().info(f"Request processed in {processing_time:.2f} seconds")
 
-        except json.JSONDecodeError as e:
-            self.get_logger().error(f'Error parsing request JSON: {e}')
-            error_response = String()
-            error_response.data = json.dumps({
-                "targets": targets_list, 
-                "type": "error", 
-                "message": f"Invalid request format: {e}"
-            })
-            self.pub.publish(error_response)
         except Exception as e:
             self.get_logger().error(f'Unexpected error in chat processing: {e}')
-            error_response = String()
-            error_response.data = json.dumps({
-                "targets": targets_list, 
-                "type": "error", 
-                "message": f"Unexpected error: {e}"
-            })
-            self.pub.publish(error_response)
+            
+            # Attempt to send error response
+            self.send_error_response(targets_list, f"Unexpected error: {e}")
 
-    def memory_callback(self, future):
-        """Callback for memory service responses"""
+    def parse_request_message(self, message_str):
+        """Parse the JSON request message"""
         try:
-            response = future.result()
-            # Check what attribute is actually available in the Chat.Response object
-            # The error suggests 'message' isn't the correct attribute name
-            if hasattr(response, 'message'):
-                self.memory_response = response.message
-            elif hasattr(response, 'response'):
-                self.memory_response = response.response
-            elif hasattr(response, 'data'):
-                self.memory_response = response.data
-            else:
-                # Log all available attributes for debugging
-                self.get_logger().error(f"Unknown response structure. Available attributes: {dir(response)}")
-                self.memory_response = None
-        except Exception as e:
-            self.get_logger().error(f"Error in memory callback: {e}")
-            self.memory_response = None
-        finally:
-            # Signal that we have a response (or failed to get one)
-            self.memory_response_ready.set()
+            return json.loads(message_str)
+        except json.JSONDecodeError as e:
+            self.get_logger().error(f'Error parsing request JSON: {e}')
+            self.send_error_response([], f"Invalid request format: {e}")
+            return None
 
-    def generate_chat_response(self, messages, targets_list, target_objects):
-        """Generate and process AI response to chat messages"""
+    def validate_request(self, message_type, request_message, targets_list):
+        """Validate the request data"""
+        # Check for request type
+        if message_type != "request":
+            self.get_logger().warn('Not a request message, ignoring.')
+            return False
+        
+        # Handle empty messages
+        if not request_message:
+            self.get_logger().warn('Received empty message.')
+            self.send_error_response(targets_list, "No message received.")
+            return False
+            
+        return True
+
+    def prepare_target_objects(self, targets_list):
+        """Process targets and retrieve or create them"""
+        target_objects = []
+        for target_name in targets_list:
+            target = self.target_manager.get_or_create_target(target_name)
+            target_objects.append(target)
+
+        # If no targets specified
+        if not target_objects:
+            self.get_logger().warn('No targets specified.')
+            self.send_error_response([], "No targets specified.")
+            return None
+            
+        return target_objects
+
+    def update_target_histories(self, target_objects, role, message):
+        """Add the message to each target's history"""
+        for target in target_objects:
+            target.add_to_history(role, message)
+
+    def build_conversation_context(self, target_objects, request_message):
+        """Build the conversation context from target histories"""
+        # Collect conversation history from all targets
+        conversation_history = []
+        for target in target_objects:
+            target_history = target.get_history()
+            if target_history:
+                self.get_logger().debug(f'Adding history for target: {target.get_target_name()}')
+                conversation_history.extend(target_history)
+            else:
+                self.get_logger().debug(f'No history for target: {target.get_target_name()}')
+
+        # Order history by time with error handling
+        try:
+            conversation_history.sort(key=lambda x: json.loads(x).get("time", 0))
+        except json.JSONDecodeError as e:
+            self.get_logger().error(f"Failed to sort history by time: {e}")
+            # Continue with unsorted history rather than failing
+        
+        # Compile messages for the AI
+        messages = [
+            {"role": "system", "content": self.INSTRUCTIONS},
+        ]
+
+        # Add previous conversation history
+        if conversation_history:
+            recent_history = []
+            # Use consistent number of messages
+            messages_to_include = min(len(conversation_history), MAX_CONTEXT*2)
+            # Convert JSON strings back to dictionaries for the API
+            for history_item in conversation_history[-messages_to_include:]:
+                try:
+                    history_dict = json.loads(history_item)
+                    recent_history.append(history_dict)
+                except json.JSONDecodeError:
+                    self.get_logger().warn(f"Failed to parse history item: {history_item}")
+                    
+            self.get_logger().debug(f'Adding conversational history, {len(recent_history)} items')
+            messages.extend(recent_history)
+
+        # Add the new user message
+        messages.append({"role": "user", "content": request_message})
+        
+        return messages
+
+    def fetch_memory_async(self, targets_list):
+        """Fetch memory information asynchronously"""
+        if not self.memory_available or not self.getMemory_client.service_is_ready():
+            self.get_logger().debug('Memory service not available, skipping memory fetch')
+            return None
+            
+        self.get_logger().debug('Fetching memory information asynchronously')
+        
+        # Create a synchronization event
+        memory_response_ready = threading.Event()
+        memory_content = [None]  # List to store response (to avoid nonlocal in Python 2)
+        
+        # Callback for memory response
+        def memory_callback(future):
+            try:
+                response = future.result()
+                if hasattr(response, 'response'):
+                    memory_content[0] = response.response
+                else:
+                    self.get_logger().error(f"Unknown memory response structure. Available attributes: {dir(response)}")
+            except Exception as e:
+                self.get_logger().error(f"Error in memory callback: {e}")
+            finally:
+                memory_response_ready.set()
+        
+        # Prepare and send request
+        memory_request = Chat.Request()
+        memory_request.message = json.dumps({"targets": targets_list, "type": "memory"})
+        future = self.getMemory_client.call_async(memory_request)
+        future.add_done_callback(memory_callback)
+        
+        # Wait for response with timeout
+        if memory_response_ready.wait(timeout=MEMORY_TIMEOUT):
+            if memory_content[0]:
+                self.get_logger().debug('Memory information received')
+                return memory_content[0]
+            else:
+                self.get_logger().warn('Memory request failed to produce content')
+        else:
+            self.get_logger().warn('Memory request timed out')
+            
+        return None
+
+    def generate_and_process_response(self, messages, targets_list, target_objects):
+        """Generate chat response and process it"""
         # Initialize variables for chat response and JSON response
         chat_response = None
         json_response = None
@@ -361,101 +348,82 @@ class ChatInterface(Node):
                 PRESENCE_PENALTY=0.0
             )
             tac = time.time()
-            self.get_logger().info(f'Received response in {tac - tic:.2f} seconds')
-            self.get_logger().info(f'Assistant reply: {assistant_reply}')
+            self.get_logger().info(f'Received AI response in {tac - tic:.2f} seconds')
         except Exception as e:
             self.get_logger().error(f"Error calling AI model: {e}")
-            error_response = String()
-            error_response.data = json.dumps({
-                "targets": targets_list, 
-                "type": "error", 
-                "message": f"Failed to get AI response: {e}"
-            })
-            self.pub.publish(error_response)
+            self.send_error_response(targets_list, f"Failed to get AI response: {e}")
             return
 
         try:
-            # Attempt to parse the assistant reply.
-            if isinstance(assistant_reply, str):
-                assistant_reply = self.llm_response_parser(assistant_reply)
-                json_response = json.loads(assistant_reply)
-                chat_response = json_response.get("message_response")
-                if not chat_response:
-                    raise KeyError("message_response not found in AI response")
-                self.get_logger().debug('Assistant reply parsed as JSON')
-            else:
-                raise ValueError(f"Unexpected response type: {type(assistant_reply)}")
+            # Parse the assistant reply
+            assistant_reply = self.llm_response_parser(assistant_reply)
+            json_response = json.loads(assistant_reply)
+            chat_response = json_response.get("message_response")
+            
+            if not chat_response:
+                raise KeyError("message_response not found in AI response")
+                
+            # Update target histories
+            self.update_target_histories(target_objects, "assistant", chat_response)
 
-            # Update the history for each target
-            for target in target_objects:
-                target.add_to_history("assistant", chat_response)
+            # Publish the chat response to user interface
+            self.send_chat_response(targets_list, chat_response)
 
-            # Publish the chat response to user interface.
-            response_msg = String()
-            response_msg.data = json.dumps({
-                "targets": targets_list, 
-                "type": "response", 
-                "message": chat_response
-            })
-            self.pub.publish(response_msg)
-            self.get_logger().info(f'Published chat response: {response_msg.data}')
-
-            # Publish the generated umrf actions to umrf planner.
+            # Publish the generated UMRF actions
             if json_response:
                 json_response["targets"] = targets_list
-                umrf_msg = String()
-                umrf_msg.data = json.dumps(json_response)
-                self.umrf_actions_pub.publish(umrf_msg)
-                self.get_logger().info(f'Published UMRF actions: {umrf_msg.data}')
+                self.publish_umrf_actions(json_response)
         
-        except json.JSONDecodeError as e:
-            self.get_logger().error(f'JSON parsing error: {e}')
-            # Still update the history with the error
+        except (json.JSONDecodeError, KeyError, ValueError) as e:
+            error_msg = f"Error processing AI response: {e}"
+            self.get_logger().error(error_msg)
+            
+            # Update target histories with error
             for target in target_objects:
-                target.add_to_history("assistant", f"Error: JSON parsing failed")
+                target.add_to_history("assistant", f"Error: {error_msg}")
                 
-            error_response = String()
-            error_response.data = json.dumps({
-                "targets": targets_list, 
-                "type": "error", 
-                "message": f"Invalid JSON response format: {e}"
-            })
-            self.pub.publish(error_response)
-        except KeyError as e:
-            self.get_logger().error(f'Missing key in response: {e}')
-            for target in target_objects:
-                target.add_to_history("assistant", f"Error: Missing key in response")
-                
-            error_response = String()
-            error_response.data = json.dumps({
-                "targets": targets_list, 
-                "type": "error", 
-                "message": f"Response missing required key: {e}"
-            })
-            self.pub.publish(error_response)
-        except ValueError as e:
-            self.get_logger().error(f'Invalid value in response: {e}')
-            for target in target_objects:
-                target.add_to_history("assistant", f"Error: Invalid value in response")
-                
-            error_response = String()
-            error_response.data = json.dumps({
-                "targets": targets_list, 
-                "type": "error", 
-                "message": f"Invalid response value: {e}"
-            })
-            self.pub.publish(error_response)
+            # Send error response
+            self.send_error_response(targets_list, error_msg)
+
+    def send_chat_response(self, targets_list, message):
+        """Send a chat response message"""
+        response_msg = String()
+        response_msg.data = json.dumps({
+            "targets": targets_list, 
+            "type": "response", 
+            "message": message
+        })
+        self.pub.publish(response_msg)
+        self.get_logger().info('Published chat response')
+
+    def send_error_response(self, targets_list, error_message):
+        """Send an error response message"""
+        error_response = String()
+        error_response.data = json.dumps({
+            "targets": targets_list, 
+            "type": "error", 
+            "message": error_message
+        })
+        self.pub.publish(error_response)
+        self.get_logger().info(f'Published error response: {error_message}')
+
+    def publish_umrf_actions(self, json_response):
+        """Publish UMRF actions to the action topic"""
+        umrf_msg = String()
+        umrf_msg.data = json.dumps(json_response)
+        self.umrf_actions_pub.publish(umrf_msg)
+        self.get_logger().info('Published UMRF actions')
 
     def llm_response_parser(self, message: str) -> str:
         """
-        Simple function to extract JSON content from LLM responses.
+        Extract JSON content from LLM responses.
         It takes everything between the first '{' and the last '}' and tries to parse it.
         Returns a fallback JSON with 'success': 'false' if parsing fails.
         """
         self.get_logger().debug(f"Parsing JSON from message of length {len(message)}")
         
         try:
-            # First, try parsing the entire message as JSON (handles clean responses)
+            # First, try parsing the entire message as JSON
             try:
                 parsed = json.loads(message)
                 self.get_logger().debug("Parsed entire message as valid JSON")
@@ -470,7 +438,7 @@ class ChatInterface(Node):
             if start != -1 and end != -1 and end > start:
                 # Extract the content
                 json_str = message[start:end + 1]
-                self.get_logger().debug(f"Extracted content from index {start} to {end}")
+                self.get_logger().debug(f"Extracted JSON content")
                 
                 # Try to parse the extracted content
                 try:
@@ -479,7 +447,6 @@ class ChatInterface(Node):
                     return json.dumps(parsed)
                 except json.JSONDecodeError as je:
                     self.get_logger().error(f"Failed to parse extracted content: {je}")
-                    self.get_logger().debug(f"Problematic content: {json_str[:100]}...")
             else:
                 self.get_logger().error("No JSON-like content found in message")
         
@@ -489,10 +456,8 @@ class ChatInterface(Node):
         # Return fallback JSON if all parsing attempts fail
         fallback = {
             "success": "false",
-            "target": getattr(self, "target", "unknown"),
-            "message": "Failed to parse LLM response",
-            "queue": [],
-            "system_cmd": []
+            "message_response": "Sorry, I encountered an error processing your request.",
+            "queue": []
         }
         self.get_logger().warning("Returning fallback JSON due to parsing failure")
         return json.dumps(fallback)
@@ -504,30 +469,19 @@ class ChatInterface(Node):
             self.target_manager.shutdown()
         super().destroy_node()
 
-    def shutdown(self):
-        """Clean shutdown of threads and resources"""
-        self.get_logger().info("Shutting down ChatInterface node")
-        self.shutdown_flag.set()
-        self.processing_thread.join(timeout=5.0)
-        self.thread_pool.shutdown(wait=True)
-        self.get_logger().info("All threads and resources cleaned up")
-
 def main(args=None):
     rclpy.init(args=args)
     node = ChatInterface()
     
-    # Create a MultiThreadedExecutor with more threads to handle concurrent callbacks
-    executor = MultiThreadedExecutor(num_threads=4)
+    executor = MultiThreadedExecutor(num_threads=8)
     executor.add_node(node)
     
     try:
-        # Use the executor instead of rclpy.spin
         executor.spin()
     except KeyboardInterrupt:
         node.get_logger().info('ChatInterface node has been shut down.')
     finally:
-        # Clean shutdown
-        node.shutdown()
+        # Cleanup
         node.destroy_node()
         rclpy.shutdown()
         

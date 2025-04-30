@@ -2,7 +2,8 @@
 
 import rclpy
 from rclpy.node import Node
-from rclpy.callback_groups import ReentrantCallbackGroup
+from rclpy.callback_groups import ReentrantCallbackGroup, MutuallyExclusiveCallbackGroup
+from rclpy.executors import MultiThreadedExecutor
 from std_msgs.msg import String
 from nl_interface_msgs.srv import Chat
 from temoto_nl_interface.ai import ai_core
@@ -13,7 +14,6 @@ import json
 import threading
 import time
 import queue
-import concurrent.futures
 from enum import Enum, auto
 from typing import Dict, List, Any, Optional, Callable
 
@@ -70,9 +70,8 @@ class TargetErrorState:
         self.creation_time = time.time()
         self.waiting_for_user_response = False
         
-        # Future results
-        self.memory_future = None
-        self.processing_future = None
+        # Processing flags
+        self.is_being_processed = False
 
     def set_state(self, new_state: TargetState) -> None:
         """Thread-safe state update"""
@@ -120,23 +119,26 @@ class TargetErrorState:
         with self.state_lock:
             return self.messages.copy()
     
+    def set_processing(self, is_processing: bool) -> None:
+        """Thread-safe update of processing flag"""
+        with self.state_lock:
+            self.is_being_processed = is_processing
+    
+    def is_processing(self) -> bool:
+        """Thread-safe access to processing flag"""
+        with self.state_lock:
+            return self.is_being_processed
+
 
 class TargetErrorManager:
-    """Manager class to handle multiple target error states efficiently"""
+    """Manager class to handle multiple target error states efficiently with thread safety"""
     
-    def __init__(self, logger, max_workers):
-        """Initialize the target error manager with thread pool"""
+    def __init__(self, logger):
+        """Initialize the target error manager"""
         self.logger = logger
         self.targets: Dict[str, TargetErrorState] = {}
         self.targets_lock = threading.RLock()
-        self.processing_queue = queue.PriorityQueue()
-        self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=max_workers)
-        self.shutdown_flag = threading.Event()
         
-        # Start worker thread to process the queue
-        self.processing_thread = threading.Thread(target=self._queue_processor, daemon=True)
-        self.processing_thread.start()
-            
     def add_target(self, target_state: TargetErrorState) -> None:
         """Add a new target to the manager"""
         with self.targets_lock:
@@ -160,64 +162,18 @@ class TargetErrorManager:
         with self.targets_lock:
             return target_id in self.targets
     
-    def enqueue_for_processing(self, target_id: str, priority: int, 
-                               processing_func: Callable, *args, **kwargs) -> None:
-        """Add a target to the processing queue with priority"""
-        if not self.has_target(target_id):
-            self.logger.warning(f"Cannot enqueue unknown target {target_id}")
-            return
-        
-        # Lower priority number means higher priority
-        self.processing_queue.put((priority, target_id, processing_func, args, kwargs))
-        self.logger.debug(f"Enqueued target {target_id} with priority {priority}")
-    
-    def _queue_processor(self) -> None:
-        """Worker thread to process the target queue"""
-        
-        while not self.shutdown_flag.is_set():
-            try:
-                # Block for a short time to allow checking shutdown flag
-                try:
-                    priority, target_id, processing_func, args, kwargs = self.processing_queue.get(timeout=1.0)
-                except queue.Empty:
-                    continue
-                
-                # Skip if target was removed while in queue
-                if not self.has_target(target_id):
-                    self.logger.warning(f"Skipping queued target {target_id}, no longer exists")
-                    self.processing_queue.task_done()
-                    continue
-                
-                # Submit to thread pool
-                target = self.get_target(target_id)
-                if target:
-                    future = self.executor.submit(processing_func, *args, **kwargs)
-                    self.logger.debug(f"Processing target {target_id} with priority {priority}")
-                
-                self.processing_queue.task_done()
-            
-            except Exception as e:
-                self.logger.error(f"Error in queue processor: {e}")
-    
-    def shutdown(self) -> None:
-        """Shutdown the manager and clean up resources"""
-        self.logger.info("Shutting down TargetErrorManager")
-        self.shutdown_flag.set()
-        
-        if self.processing_thread.is_alive():
-            self.processing_thread.join(timeout=5.0)
-        
-        self.executor.shutdown(wait=False)
-        self.logger.info("TargetErrorManager shutdown complete")
+    def get_all_target_ids(self) -> List[str]:
+        """Get a list of all target IDs"""
+        with self.targets_lock:
+            return list(self.targets.keys())
 
 
 class ErrorHandler(Node):
     def __init__(self):
         super().__init__('error_handler_node')
 
-        # Create target manager
-        max_workers = 10
-        self.target_manager = TargetErrorManager(self.get_logger(), max_workers)
+        # Create target manager for thread-safe access
+        self.target_manager = TargetErrorManager(self.get_logger())
 
         # Get the instructions
         self.INSTRUCTIONS = ""
@@ -229,13 +185,15 @@ class ErrorHandler(Node):
 
         # Callback groups
         self.get_logger().debug('Creating callback groups')
-        self.memory_response_callback_group = ReentrantCallbackGroup()
-        self.subscriber_callback_group = ReentrantCallbackGroup()
-
+        self.memory_cb_group = ReentrantCallbackGroup()  # For memory service
+        self.processing_cb_group = ReentrantCallbackGroup()  # For error processing tasks
+        self.subscriber_cb_group = ReentrantCallbackGroup()  # For subscriptions
+        
         # Service client for get mem info
         self.get_logger().debug('Creating service client for memory')
         self.memory_available = True
-        self.getMemory_client = self.create_client(Chat, 'get_memory', callback_group=self.memory_response_callback_group)
+        self.getMemory_client = self.create_client(
+            Chat, 'get_memory', callback_group=self.memory_cb_group)
         if not self.getMemory_client:
             self.memory_available = False
             self.get_logger().error('Failed to create getMemory client')
@@ -243,19 +201,26 @@ class ErrorHandler(Node):
         # UMRF Planning IO
         self.get_logger().debug('Setting up UMRF Planning IO')
         self.error_handling_message = self.create_subscription(
-            String, '/error_handling_message', self.listener_callback, 10)
-        self.error_queue_update_pub = self.create_publisher(String,'/umrf_correction',10)
+            String, '/error_handling_message', self.listener_callback, 10,
+            callback_group=self.subscriber_cb_group)
+        self.error_queue_update_pub = self.create_publisher(String, '/umrf_correction', 10)
 
         # Chat Interface IO
         self.get_logger().debug('Setting up Chat Interface IO')
         self.prompt_response_sub = self.create_subscription(
             String, '/chat_interface_input', self.prompt_response_callback, 10, 
-            callback_group=self.subscriber_callback_group)
+            callback_group=self.subscriber_cb_group)
         self.prompt_request_pub = self.create_publisher(String, '/chat_interface_feedback', 10)
         self.action_status_pub = self.create_publisher(String, '/action_status', 10)
 
-
-        self.get_logger().info(f'Error Handler node is active with {max_workers} concurrent workers.')
+        # Timer for background processing
+        self.processing_timer = self.create_timer(
+            0.5,  # Check every 500ms
+            self.process_targets,
+            callback_group=self.processing_cb_group
+        )
+        
+        self.get_logger().info('Error Handler node is active with ROS2 callback groups')
 
     def listener_callback(self, msg):
         """Handle incoming error messages"""
@@ -311,19 +276,16 @@ class ErrorHandler(Node):
                 user_presence_penalty=user_presence_penalty
             )
             
-            # Add to manager
+            # Add to manager - thread safe operation
             self.target_manager.add_target(target_state)
             self.get_logger().info(f"Created state for target: {target}")
             
-            # Process memory if asked and if available
+            # Process memory if asked and available
             if process_use_mem == "true" and self.memory_available == True:
                 target_state.set_state(TargetState.WAITING_FOR_MEMORY)
                 self.request_memory_for_target(target)
             else:
                 target_state.set_state(TargetState.PROCESSING)
-                # Enqueue with medium priority (5)
-                self.target_manager.enqueue_for_processing(
-                    target, 5, self.process_error_handling, target)
 
         except json.JSONDecodeError as je:
             self.get_logger().error(f"JSON decode error in listener_callback: {je}")
@@ -345,12 +307,7 @@ class ErrorHandler(Node):
             self.get_logger().error(f"Memory service not available for target {target_id}")
             target_state.set_memory("""{"error":"memory_service_unavailable"}""")
             target_state.set_state(TargetState.PROCESSING)
-            
-            # Enqueue with medium priority (5)
-            self.target_manager.enqueue_for_processing(
-                target_id, 5, self.process_error_handling, target_id)
         else:
-            # Store the target_id with the request
             req = Chat.Request()
             req.message = json.dumps({
                 "request": target_state.error_message,
@@ -375,20 +332,29 @@ class ErrorHandler(Node):
             target_state.set_memory(memory_content)
             target_state.set_state(TargetState.PROCESSING)
             self.get_logger().info(f"Memory content stored for target {target_id}")
-            
-            # Enqueue with medium priority (5)
-            self.target_manager.enqueue_for_processing(
-                target_id, 5, self.process_error_handling, target_id)
                 
         except Exception as e:
             self.get_logger().error(f"Memory response error for {target_id}: {e}")
             
             target_state.set_memory("""{"error":"memory_service_error"}""")
             target_state.set_state(TargetState.PROCESSING)
+
+    def process_targets(self):
+        """Process targets that are ready for processing directly without creating additional timers"""
+        target_ids = self.target_manager.get_all_target_ids()
+        
+        for target_id in target_ids:
+            target_state = self.target_manager.get_target(target_id)
+            if not target_state:
+                continue 
+                
+            if (target_state.get_state() != TargetState.PROCESSING or 
+                target_state.is_processing()):
+                continue
             
-            # Enqueue with medium priority (5)
-            self.target_manager.enqueue_for_processing(
-                target_id, 5, self.process_error_handling, target_id)
+            target_state.set_processing(True)
+            self.process_error_handling(target_id)
+
 
     def process_error_handling(self, target_id):
         """Process error handling for a specific target"""
@@ -399,55 +365,51 @@ class ErrorHandler(Node):
         
         self.get_logger().info(f"Starting error handling process for target {target_id}")
         
-        # Compose AI prompt messages
-        messages = [{"role": "system", "content": f"Instructions: {self.INSTRUCTIONS}"}]
-        
-        # Include action called information
-        if target_state.action_called != "none":
-            messages.append({"role": "user", "content": f"Action Called: {target_state.action_called}"})
-        
-        # Include error message
-        if target_state.error_message != "none":
-            messages.append({"role": "user", "content": f"Error Message: {target_state.error_message}"})
-        
-        # Include memory if available
-        if target_state.memory != "none":
-            messages.append({"role": "user", "content": f"Memory: {target_state.memory}"})
-        
-        # Include runtime messages if available
-        if target_state.runtime_messages != "none":
-            messages.append({"role": "user", "content": f"Runtime Messages: {target_state.runtime_messages}"})
-        
-        """         # Include UMRF queue if available
-        if target_state.umrf_queue != "none":
-            queue_str = json.dumps(target_state.umrf_queue) if not isinstance(target_state.umrf_queue, str) else target_state.umrf_queue
-            queue_summary = queue_str[:1000] + "..." if len(queue_str) > 1000 else queue_str
-            messages.append({"role": "user", "content": f"Upcoming Actions Queued: {queue_str}"}) """
-
-        # Include UMRF queue if available + Remove first action (ERROR)
-        if target_state.umrf_queue != "none":
-            queue_data = json.loads(target_state.umrf_queue)
-            if isinstance(queue_data, list) and len(queue_data) > 0:
-                queue_data = queue_data[1:]
-            queue_str = json.dumps(queue_data)
-            queue_summary = queue_str[:1000] + "..." if len(queue_str) > 1000 else queue_str
-            messages.append({"role": "user", "content": f"Upcoming Actions Queued: {queue_summary}"})
-
-        # Include additional task data if available
-        if target_state.process_data_text != "none":
-            messages.append({"role": "user", "content": f"Task Data Text: {target_state.process_data_text}"})
-        if target_state.process_data_images != "none":
-            messages.append({"role": "user", "content": f"Task Data Images: {target_state.process_data_images}"})
-        
-        # Store the messages in the target state
-        for msg in messages:
-            target_state.add_message(msg["role"], msg["content"])
-        
-        self.get_logger().info(f"Messages prepared for target {target_id}")
-
-        # Call the AI to help resolve the error
-        self.get_logger().info(f"Calling AI for target {target_id}")
         try:
+            # Compose AI prompt messages
+            messages = [{"role": "system", "content": f"Instructions: {self.INSTRUCTIONS}"}]
+            
+            # Include action called information
+            if target_state.action_called != "none":
+                messages.append({"role": "user", "content": f"Action Called: {target_state.action_called}"})
+            
+            # Include error message
+            if target_state.error_message != "none":
+                messages.append({"role": "user", "content": f"Error Message: {target_state.error_message}"})
+            
+            # Include memory if available
+            if target_state.memory != "none":
+                messages.append({"role": "user", "content": f"Memory: {target_state.memory}"})
+            
+            # Include runtime messages if available
+            if target_state.runtime_messages != "none":
+                messages.append({"role": "user", "content": f"Runtime Messages: {target_state.runtime_messages}"})
+            
+            # Include UMRF queue if available + Remove first action (ERROR)
+            if target_state.umrf_queue != "none":
+                queue_data = json.loads(target_state.umrf_queue)
+                if isinstance(queue_data, list) and len(queue_data) > 0:
+                    queue_data = queue_data[1:]
+                queue_str = json.dumps(queue_data)
+                queue_summary = queue_str[:1000] + "..." if len(queue_str) > 1000 else queue_str
+                messages.append({"role": "user", "content": f"Upcoming Actions Queued: {queue_summary}"})
+
+            # Include additional task data if available
+            if target_state.process_data_text != "none":
+                messages.append({"role": "user", "content": f"Task Data Text: {target_state.process_data_text}"})
+            if target_state.process_data_images != "none":
+                messages.append({"role": "user", "content": f"Task Data Images: {target_state.process_data_images}"})
+            
+            # Store the messages in the target state
+            for msg in messages:
+                target_state.add_message(msg["role"], msg["content"])
+            
+            self.get_logger().info(f"Messages prepared for target {target_id}")
+
+            # Call the AI to help resolve the error
+            self.get_logger().info(f"Calling AI for target {target_id}")
+            
+            # Get AI response
             assistant_reply = ai_core.AI_Image_Prompt(
                 messages, 
                 target_state.auto_temperature, 
@@ -497,19 +459,26 @@ class ErrorHandler(Node):
                             f"(time: {time.time()}) Autonomous Assistant message using only memory: {json.dumps(auto_solving_response)}"
                         )
                         target_state.error_message = auto_solving_response.get("message", target_state.error_message)
+                        target_state.set_processing(False) 
 
                         self.get_logger().info(f"Auto solving failed for target {target_id}, trying user prompt")
                         self.handle_user_prompt(target_id)
                 except json.JSONDecodeError:
                     self.get_logger().error(f"JSON decode error with assistant response for {target_id}")
+                    target_state.set_processing(False)  
                     self.handle_user_prompt(target_id)
             else:
                 self.get_logger().info(f"Skipping automatic solving for {target_id}, directly prompting user")
+                target_state.set_processing(False) 
                 self.handle_user_prompt(target_id)
                 
         except Exception as e:
             self.get_logger().error(f"Error during AI processing for target {target_id}: {e}")
-            self.handle_user_prompt(target_id)
+            # Make sure target exists before trying to update it
+            target_state = self.target_manager.get_target(target_id)
+            if target_state:
+                target_state.set_processing(False)
+                self.handle_user_prompt(target_id)
 
     def handle_user_prompt(self, target_id):
         """Start the user prompt process for a target"""
@@ -527,7 +496,6 @@ class ErrorHandler(Node):
             self.stop_status(target_id)
             return
         
-        # Start the first trial
         self.start_user_prompt_trial(target_id)
 
     def start_user_prompt_trial(self, target_id):
@@ -580,16 +548,15 @@ class ErrorHandler(Node):
                 self.get_logger().debug(f"Ignoring non-response message type: {msg_type}")
                 return
             
-            # Process the response for each target
+            # Process the response for each target directly
             for target_id in response_targets:
-                # Process with high priority (1)
-                self.target_manager.enqueue_for_processing(
-                    target_id, 1, self.process_target_response, target_id, response_message)
+                self.process_target_response(target_id, response_message)
         
         except json.JSONDecodeError as je:
             self.get_logger().error(f"JSON decode error in prompt_response_callback: {je}")
         except Exception as e:
             self.get_logger().error(f"Unexpected error in prompt_response_callback: {e}")
+    
 
     def process_target_response(self, target_id, response_message):
         """Process a user response for a specific target"""
@@ -603,6 +570,9 @@ class ErrorHandler(Node):
         if not target_state.get_waiting_for_user_response():
             self.get_logger().debug(f"Target {target_id} not waiting for response, ignoring")
             return
+        
+        # Mark as being processed
+        target_state.set_processing(True)
         
         # Update state
         target_state.set_waiting_for_user_response(False)
@@ -690,22 +660,22 @@ class ErrorHandler(Node):
                     self.target_manager.remove_target(target_id)
                 else:
                     self.get_logger().info(f"User-assisted solving failed for target {target_id}, trying next trial")
-                    # Process with medium-high priority (3)
-                    self.target_manager.enqueue_for_processing(
-                        target_id, 3, self.start_user_prompt_trial, target_id)
+                    target_state.set_processing(False)  
+                    self.start_user_prompt_trial(target_id)
             
             except json.JSONDecodeError:
                 self.get_logger().error(f"JSON decode error with prompt reply for target {target_id}")
-                # Process with medium-high priority (3)
-                self.target_manager.enqueue_for_processing(
-                    target_id, 3, self.start_user_prompt_trial, target_id)
+                target_state.set_processing(False) 
+                self.start_user_prompt_trial(target_id)
         
         except Exception as e:
             self.get_logger().error(f"Error processing user response for target {target_id}: {e}")
-            # Process with medium-high priority (3)
-            self.target_manager.enqueue_for_processing(
-                target_id, 3, self.start_user_prompt_trial, target_id)
-
+            # Check if target still exists
+            target_state = self.target_manager.get_target(target_id)
+            if target_state:
+                target_state.set_processing(False)
+                self.start_user_prompt_trial(target_id)
+            
     def stop_status(self, target_id):
         """Send stop status for a target and clean up"""
         self.get_logger().info(f"Sending stop status for target {target_id}")
@@ -778,18 +748,23 @@ class ErrorHandler(Node):
     def destroy_node(self):
         """Clean up resources when node is destroyed"""
         self.get_logger().info("Shutting down error handler node")
-        if hasattr(self, 'target_manager'):
-            self.target_manager.shutdown()
         super().destroy_node()
+
 
 def main(args=None):
     rclpy.init(args=args)
+    
     node = ErrorHandler()
+    
+    executor = MultiThreadedExecutor(num_threads=4)
+    executor.add_node(node)
+    
     try:
-        rclpy.spin(node)
+        executor.spin()
     except KeyboardInterrupt:
         node.get_logger().info("Node stopped via keyboard interrupt.")
     finally:
+        executor.shutdown()
         node.destroy_node()
         rclpy.shutdown()
 

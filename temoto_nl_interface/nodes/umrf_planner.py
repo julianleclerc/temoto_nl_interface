@@ -124,7 +124,6 @@ class UMRF_PLANNER(Node):
         self.error_handling_message = self.create_publisher(String, '/error_handling_message',10) 
         self.error_queue_update = self.create_subscription(String,'/umrf_correction',self.umrf_graph_correction,10)
         self.umrf_feedback_sub = self.create_subscription(UmrfGraphFeedback,'/umrf_graph_feedback',self.umrf_feedback,10)
-        self.umrf_feedback_pub = self.create_publisher(UmrfGraphFeedback,'/umrf_graph_feedback',10)
         self.umrf_stop_pub = self.create_publisher(UmrfGraphStop, '/umrf_graph_stop', 10)
         self.umrf_resume_pub = self.create_publisher(UmrfGraphResume, '/umrf_graph_resume', 10)
         self.umrf_pause_pub = self.create_publisher(UmrfGraphPause, '/umrf_graph_pause', 10)

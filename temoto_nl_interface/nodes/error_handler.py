@@ -17,6 +17,8 @@ import queue
 from enum import Enum, auto
 from typing import Dict, List, Any, Optional, Callable
 
+MEMORY_TIMEOUT = 3.0 
+
 class TargetState(Enum):
     CREATED = auto()
     WAITING_FOR_MEMORY = auto()
@@ -62,10 +64,11 @@ class TargetErrorState:
         # State management
         self.state = TargetState.CREATED
         self.state_lock = threading.RLock()
-        self.messages = []  
+        self.messages = []
         self.memory = "none"
         self.trial_nb = 0
         self.max_trials = 3
+        self.auto_completion_passed = False
         self.last_interaction_time = time.time()
         self.creation_time = time.time()
         self.waiting_for_user_response = False
@@ -166,6 +169,23 @@ class TargetErrorManager:
         """Get a list of all target IDs"""
         with self.targets_lock:
             return list(self.targets.keys())
+    
+    def get_latest_user_message(self, target_id):
+        """Get the latest user message for the memory"""
+        with self.targets_lock:
+            target = self.targets.get(target_id)
+            if not target:
+                self.logger.warning(f"Cannot get latest message for unknown target: {target_id}")
+                return "No message available"
+            
+            # Find the latest user message in the messages list
+            user_messages = [msg["content"] for msg in target.messages 
+                            if msg["role"] == "user" and "User message:" in msg["content"]]
+            
+            if user_messages:
+                return user_messages[-1]
+            return target.error_message
+        
 
 
 class ErrorHandler(Node):
@@ -280,12 +300,13 @@ class ErrorHandler(Node):
             self.target_manager.add_target(target_state)
             self.get_logger().info(f"Created state for target: {target}")
             
-            # Process memory if asked and available
-            if process_use_mem == "true" and self.memory_available == True:
-                target_state.set_state(TargetState.WAITING_FOR_MEMORY)
-                self.request_memory_for_target(target)
-            else:
-                target_state.set_state(TargetState.PROCESSING)
+            target_state.add_message(
+                "user", 
+                f"(time: {time.time()}) Original error message: {target_state.error_message}"
+            )
+
+            # Start trying to solve error autonomously
+            self.process_error_handling(target)
 
         except json.JSONDecodeError as je:
             self.get_logger().error(f"JSON decode error in listener_callback: {je}")
@@ -293,51 +314,6 @@ class ErrorHandler(Node):
         except Exception as e:
             self.get_logger().error(f"Unexpected error in listener_callback: {e}")
             self.get_logger().error(f"Exception type: {type(e).__name__}")
-
-    def request_memory_for_target(self, target_id):
-        """Request memory for a specific target"""
-        target_state = self.target_manager.get_target(target_id)
-        if not target_state:
-            self.get_logger().error(f"Cannot request memory for unknown target: {target_id}")
-            return
-        
-        self.get_logger().info(f"Requesting memory for target {target_id}")
-        
-        if not self.getMemory_client.wait_for_service(timeout_sec=5.0):
-            self.get_logger().error(f"Memory service not available for target {target_id}")
-            target_state.set_memory("""{"error":"memory_service_unavailable"}""")
-            target_state.set_state(TargetState.PROCESSING)
-        else:
-            req = Chat.Request()
-            req.message = json.dumps({
-                "request": target_state.error_message,
-                "target": target_id
-            })
-            future = self.getMemory_client.call_async(req)
-            future.add_done_callback(lambda f: self.memory_response_callback(f, target_id))
-
-    def memory_response_callback(self, future, target_id):
-        """Handle memory response for a specific target"""
-        self.get_logger().info(f"Memory response callback triggered for target {target_id}")
-        
-        target_state = self.target_manager.get_target(target_id)
-        if not target_state:
-            self.get_logger().warning(f"Memory response for unknown target: {target_id}")
-            return
-        
-        try:
-            memory_response = future.result()
-            memory_content = memory_response.response if memory_response else "none"
-            
-            target_state.set_memory(memory_content)
-            target_state.set_state(TargetState.PROCESSING)
-            self.get_logger().info(f"Memory content stored for target {target_id}")
-                
-        except Exception as e:
-            self.get_logger().error(f"Memory response error for {target_id}: {e}")
-            
-            target_state.set_memory("""{"error":"memory_service_error"}""")
-            target_state.set_state(TargetState.PROCESSING)
 
     def process_targets(self):
         """Process targets that are ready for processing directly without creating additional timers"""
@@ -363,7 +339,24 @@ class ErrorHandler(Node):
             self.get_logger().error(f"Cannot process error for unknown target: {target_id}")
             return
         
+        # Check if already being processed to avoid double processing
+        if target_state.is_processing():
+            self.get_logger().debug(f"Target {target_id} is already being processed, skipping")
+            return
+            
+        target_state.set_processing(True)
         self.get_logger().info(f"Starting error handling process for target {target_id}")
+
+        # Process memory if asked and available
+        if target_state.process_use_mem == "true" and self.memory_available == True:
+            target_state.set_state(TargetState.WAITING_FOR_MEMORY)
+            memory_content = self.request_memory_for_target(target_id)
+            if memory_content:
+                target_state.set_memory(memory_content)
+            else:
+                target_state.set_memory("none")
+        
+        target_state.set_state(TargetState.PROCESSING)  # Set state after memory handling
         
         try:
             # Compose AI prompt messages
@@ -375,15 +368,15 @@ class ErrorHandler(Node):
             
             # Include error message
             if target_state.error_message != "none":
-                messages.append({"role": "user", "content": f"Error Message: {target_state.error_message}"})
+                messages.append({"role": "user", "content": f"time: {time.time()} Error Message: {target_state.error_message}"})
             
             # Include memory if available
             if target_state.memory != "none":
-                messages.append({"role": "user", "content": f"Memory: {target_state.memory}"})
+                messages.append({"role": "user", "content": f"time: {time.time()} Memory: {target_state.memory}"})
             
             # Include runtime messages if available
             if target_state.runtime_messages != "none":
-                messages.append({"role": "user", "content": f"Runtime Messages: {target_state.runtime_messages}"})
+                messages.append({"role": "user", "content": f"time: {time.time()} Runtime Messages: {target_state.runtime_messages}"})
             
             # Include UMRF queue if available + Remove first action (ERROR)
             if target_state.umrf_queue != "none":
@@ -450,10 +443,6 @@ class ErrorHandler(Node):
                         self.target_manager.remove_target(target_id)
                     else:
                         # Log assistant response into target state
-                        target_state.add_message(
-                            "user", 
-                            f"(time: {time.time()}) Original error message: {target_state.error_message}"
-                        )
                         target_state.add_message(
                             "assistant", 
                             f"(time: {time.time()}) Autonomous Assistant message using only memory: {json.dumps(auto_solving_response)}"
@@ -571,21 +560,38 @@ class ErrorHandler(Node):
             self.get_logger().debug(f"Target {target_id} not waiting for response, ignoring")
             return
         
-        # Mark as being processed
+        # Mark as being processed immediately to prevent double processing
         target_state.set_processing(True)
         
-        # Update state
+        # Update state - no longer waiting for user response
         target_state.set_waiting_for_user_response(False)
         
-        # Add user response to messages
+        # Add user response to messages first
         target_state.add_message(
             "user", 
             f"(time: {time.time()}) User message: {response_message}"
         )
         
+        # Fetch memory if asked and available
+        if target_state.process_use_mem == "true" and self.memory_available == True:
+            target_state.set_state(TargetState.WAITING_FOR_MEMORY)
+            memory_content = self.request_memory_for_target(target_id)
+            if memory_content:
+                target_state.set_memory(memory_content)
+                target_state.add_message(
+                    "user", 
+                    f"(time: {time.time()}) Memory: {memory_content}"
+                )
+            else:
+                target_state.set_memory("none")
+        
+        target_state.set_state(TargetState.PROCESSING)
+        
         # Process with AI
         try:
+            # Get the full message history including the newly added memory
             messages = target_state.get_messages_copy()
+            
             temperature = target_state.user_temperature
             max_tokens = target_state.user_max_tokens
             frequency_penalty = target_state.user_frequency_penalty
@@ -675,7 +681,51 @@ class ErrorHandler(Node):
             if target_state:
                 target_state.set_processing(False)
                 self.start_user_prompt_trial(target_id)
+
+    def request_memory_for_target(self, target_id):
+        """Fetch memory information asynchronously"""
+        if not self.memory_available or not self.getMemory_client.service_is_ready():
+            self.get_logger().debug('Memory service not available, skipping memory fetch')
+            return None
             
+        self.get_logger().debug('Fetching memory information asynchronously')
+        
+        # Create a synchronization event
+        memory_response_ready = threading.Event()
+        memory_content = [None]  
+        
+        # Callback for memory response
+        def memory_callback(future):
+            try:
+                response = future.result()
+                if hasattr(response, 'response'):
+                    memory_content[0] = response.response
+                else:
+                    self.get_logger().error(f"Unknown memory response structure. Available attributes: {dir(response)}")
+            except Exception as e:
+                self.get_logger().error(f"Error in memory callback: {e}")
+            finally:
+                memory_response_ready.set()
+        
+        # Prepare and send request
+        request_message = self.target_manager.get_latest_user_message(target_id)
+        memory_request = Chat.Request()
+        memory_request.message = json.dumps({"request": f"{request_message}"})
+        future = self.getMemory_client.call_async(memory_request)
+        future.add_done_callback(memory_callback)
+        
+        # Wait for response with timeout
+        if memory_response_ready.wait(timeout=MEMORY_TIMEOUT):
+            if memory_content[0]:
+                self.get_logger().debug('Memory information received')
+                return memory_content[0]
+            else:
+                self.get_logger().warn('Memory request failed to produce content')
+        else:
+            self.get_logger().warn('Memory request timed out')
+        return None
+
+
     def stop_status(self, target_id):
         """Send stop status for a target and clean up"""
         self.get_logger().info(f"Sending stop status for target {target_id}")

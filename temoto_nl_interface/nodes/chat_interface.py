@@ -183,7 +183,7 @@ class ChatInterface(Node):
             messages = self.build_conversation_context(target_objects, request_message)
             
             # Fetch memory if available (non-blocking)
-            memory_content = self.fetch_memory_async(targets_list)
+            memory_content = self.fetch_memory_async(targets_list, request_message)
             if memory_content:
                 messages.append({"role": "system", "content": f"Memory information: {memory_content}"})
             
@@ -289,7 +289,7 @@ class ChatInterface(Node):
         
         return messages
 
-    def fetch_memory_async(self, targets_list):
+    def fetch_memory_async(self, targets_list, request_message):
         """Fetch memory information asynchronously"""
         if not self.memory_available or not self.getMemory_client.service_is_ready():
             self.get_logger().debug('Memory service not available, skipping memory fetch')
@@ -299,7 +299,7 @@ class ChatInterface(Node):
         
         # Create a synchronization event
         memory_response_ready = threading.Event()
-        memory_content = [None]  # List to store response (to avoid nonlocal in Python 2)
+        memory_content = [None]  
         
         # Callback for memory response
         def memory_callback(future):
@@ -316,7 +316,7 @@ class ChatInterface(Node):
         
         # Prepare and send request
         memory_request = Chat.Request()
-        memory_request.message = json.dumps({"targets": targets_list, "type": "memory"})
+        memory_request.message = json.dumps({"request": f"{request_message}"})
         future = self.getMemory_client.call_async(memory_request)
         future.add_done_callback(memory_callback)
         
@@ -329,7 +329,6 @@ class ChatInterface(Node):
                 self.get_logger().warn('Memory request failed to produce content')
         else:
             self.get_logger().warn('Memory request timed out')
-            
         return None
 
     def generate_and_process_response(self, messages, targets_list, target_objects):

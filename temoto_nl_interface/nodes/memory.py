@@ -50,13 +50,9 @@ class Memory:
             "info": self.info
         }
     
-    def get_info_dict(self):
+    def get_info(self):
         """Get just the name and info for LLM queries"""
-        return {
-            "name": self.name,
-            "info": self.info
-        }
-
+        return self.info
 
 class MemoryManager:
     """Manager class to handle multiple memories with thread safety"""
@@ -109,7 +105,7 @@ class MemoryManager:
     def get_memory_info_for_llm(self):
         """Get memory info dictionary for LLM queries"""
         with self.lock:
-            return {name: memory.get_info_dict() for name, memory in self.memories.items()}
+            return {name: memory.get_info() for name, memory in self.memories.items()}
 
 
 class MemoryNode(Node):
@@ -204,9 +200,9 @@ class MemoryNode(Node):
             # Prepare the messages for AI
             instructions = memory_prompt.getprompt()
             messages = [
-                {"role": "system", "content": instructions},
-                {"role": "assistant", "content": request_message},
-                {"role": "user", "content": json.dumps(memory_info)}
+                {"role": "system", "content": f"INSTRUCTIONS: {instructions}"},
+                {"role": "system", "content": f"MEMORY: {json.dumps(memory_info)}"},
+                {"role": "user", "content": request_message}
             ]
             self.get_logger().info(f"Prepared messages for AI analysis")
 
@@ -218,9 +214,11 @@ class MemoryNode(Node):
 
             # Call AI to handle the request
             self.get_logger().info("Calling AI to analyze memory request...")
+            self.get_logger().info(f"Request: {messages}")
             assistant_reply = ai_core.AI_Image_Prompt(
                 messages, temperature, max_tokens, frequency_penalty, presence_penalty)
             self.get_logger().info(f"Received AI response for memory selection")
+            self.get_logger().info(f"response: {assistant_reply}")
 
             # Prepare the response
             try:
